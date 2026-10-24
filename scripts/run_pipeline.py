@@ -1,9 +1,10 @@
-"""CLI scaffold; implementation follows in a separate commit."""
+"""Equivalent to python main.py from any working directory."""
 
+from pathlib import Path
+import sys
 
-def main():
-    raise NotImplementedError("CLI has not been committed yet")
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from arxiv_pipeline.main import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
