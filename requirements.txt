@@ -1,0 +1,3 @@
+# TV1 runtime uses the Python standard library (Python >= 3.10).
+# Install the local package and its arxiv-pipeline command:
+-e .
