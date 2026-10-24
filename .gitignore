@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# arXiv downloaded sources, corpus, checkpoints and local runs
+/data/
+/outputs/
+/demo-output/
+/artifacts/
+*.egg-info/
