@@ -73,7 +73,8 @@ class CLITests(TestCase):
 
     def test_pending_modules_make_full_pipeline_incomplete(self):
         client, _ = fixture_client()
-        self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
+        with patch("arxiv_pipeline.crawling.downloader.run", side_effect=NotImplementedError("pending")):
+            self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
         stages = json.loads((self.output / "manifests/stages.json").read_text())
         self.assertEqual([s["status"] for s in stages], ["not_implemented", "skipped"] * 2 + ["not_implemented"] * 3)
 
