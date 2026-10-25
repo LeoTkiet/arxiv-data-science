@@ -73,9 +73,19 @@ class CLITests(TestCase):
 
     def test_pending_modules_make_full_pipeline_incomplete(self):
         client, _ = fixture_client()
-        self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
+
+        def references(record, output, *, version=None, upstream=None):
+            path = output / "references/synthetic.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("[]", encoding="utf-8")
+            return StageResult("references", record["arxiv_id"], None, "success", utc_now(),
+                               artifacts={"references": "references/synthetic.json"})
+
+        with patch("arxiv_pipeline.crawling.references.run", references):
+            self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
         stages = json.loads((self.output / "manifests/stages.json").read_text())
-        self.assertEqual([s["status"] for s in stages], ["not_implemented", "skipped"] * 2 + ["not_implemented"] * 3)
+        self.assertEqual([s["status"] for s in stages],
+                         ["not_implemented", "skipped"] * 2 + ["not_implemented", "success", "not_implemented"])
 
     def test_invalid_config(self):
         client, _ = fixture_client()
