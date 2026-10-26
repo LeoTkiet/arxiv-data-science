@@ -148,7 +148,8 @@ def discover(input_id: str, client: ArxivClient | None = None) -> DiscoveryRecor
             source, corpus = version_paths(base, version)
             record.versions.append(VersionRecord(version, f"{base}v{version}",
                 f"https://arxiv.org/src/{base}v{version}", source, corpus,
-                metadata["submission_date"], metadata["updated_date"]))
+                metadata["submission_date"], metadata["updated_date"],
+                metadata["title"], metadata["authors"], metadata["venue"]))
             if version == 1:
                 record.metadata["submission_date"] = metadata["submission_date"]
             else:
