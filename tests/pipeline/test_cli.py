@@ -73,15 +73,7 @@ class CLITests(TestCase):
 
     def test_pending_modules_make_full_pipeline_incomplete(self):
         client, _ = fixture_client()
-
-        def references(record, output, *, version=None, upstream=None):
-            path = output / "references/synthetic.json"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("[]", encoding="utf-8")
-            return StageResult("references", record["arxiv_id"], None, "success", utc_now(),
-                               artifacts={"references": "references/synthetic.json"})
-
-        with patch("arxiv_pipeline.crawling.references.run", references):
+        with patch("arxiv_pipeline.crawling.downloader.run", side_effect=NotImplementedError("pending")):
             self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
         stages = json.loads((self.output / "manifests/stages.json").read_text())
         self.assertEqual([s["status"] for s in stages],
