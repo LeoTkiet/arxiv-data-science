@@ -41,6 +41,8 @@ class DiscoveryTests(TestCase):
         self.assertEqual(result.metadata["title"], "Test Paper")
         self.assertEqual(result.metadata["revised_dates"], ["2023-01-02T00:00:00Z"])
         self.assertEqual(result.versions[0].source_path, "raw/2301.00001/v1/source")
+        self.assertEqual([(v.title, v.authors, v.venue) for v in result.versions],
+                         [("Test Paper", ["Alice Example"], "Test Journal")] * 2)      # kept for every version
 
     def test_legacy_and_single_version(self):
         client, _ = fixture_client({"hep-th/9901001": feed("hep-th/9901001", 1)})

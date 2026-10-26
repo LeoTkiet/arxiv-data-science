@@ -7,7 +7,7 @@ name = "arxiv-data-science"
 version = "0.1.0"
 description = "Version-aware arXiv corpus pipeline"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["requests>=2.31", "python-dotenv>=1.0"]
 
 [project.scripts]
 arxiv-pipeline = "arxiv_pipeline.main:main"
