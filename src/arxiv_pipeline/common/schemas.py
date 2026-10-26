@@ -26,6 +26,9 @@ class VersionRecord:
     corpus_path: str
     submission_date: str
     updated_date: str
+    title: str | None = None
+    authors: list[str] = field(default_factory=list)
+    venue: str | None = None
 
 
 @dataclass

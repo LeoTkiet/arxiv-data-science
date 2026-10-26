@@ -33,9 +33,14 @@ Một phần tử `versions`:
   "source_path": "raw/2301.00001/v1/source",
   "corpus_path": "corpus/2301.00001/v1",
   "submission_date": "2023-01-01T00:00:00Z",
-  "updated_date": "2023-01-01T00:00:00Z"
+  "updated_date": "2023-01-01T00:00:00Z",
+  "title": "Example title of this version",
+  "authors": ["Alice Example"],
+  "venue": null
 }
 ```
+
+`title`, `authors`, `venue` (arXiv `journal_ref`, null nếu không có) là metadata của chính version đó, vì chúng có thể đổi giữa các version; các trường cấp paper trong `metadata` lấy từ version mới nhất. Ba trường này được thêm sau, có giá trị mặc định (`null`, `[]`) nên `schema_version` vẫn là `1.0`; checkpoint Discovery cũ thiếu chúng và được stage `metadata` ghi là trường thiếu.
 
 Ví dụ trên là dữ liệu minh họa schema, không phải metadata đã truy vấn. Legacy ID `hep-th/9901001` dùng khóa thư mục `hep-th_9901001`. Mọi đường dẫn trong JSON là đường dẫn tương đối với `--output`, dùng `/`. Không nhúng đường dẫn tuyệt đối hoặc `..`.
 

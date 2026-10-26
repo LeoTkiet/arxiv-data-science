@@ -96,4 +96,8 @@ Một reference:
 - Status: `success` (có reference), `no_data` (S2 có paper nhưng không có reference), `not_indexed` (S2 không biết paper), `api_error` (hết retry hoặc HTTP 400, không ghi file, thử lại ở lần chạy sau).
 
 
+## Metadata
+
+Stage `metadata` (`crawling/metadata.py`) không gọi mạng: nó kiểm tra record Discovery, chuẩn hoá và ghi `metadata/<paper_key>.json`. Cấp paper có đúng các cột bảng `papers` (`arxiv_id`, `title`, `authors`, `submission_date` từ v1, `revised_dates` từ v2..vn, `venue` từ `journal_ref`, có thể `null`) cùng `abstract`, `categories`, `doi`, `source`, `retrieved_at`. Mỗi phần tử của `versions[]` có metadata riêng của version đó (`title`, `authors`, `venue`, `submission_date`, `updated_date`). Giá trị thiếu là `null`/`[]` và được ghi trong `missing_fields`; không suy đoán. Record không hợp lệ cho `data_error`, không ghi file. Test: `python -m unittest tests.crawling.test_metadata -v`.
+
 Quy trình nhóm: tạo issue có người phụ trách, input/output và tiêu chí nghiệm thu; làm trên nhánh `feature/...` theo kế hoạch nhóm, PR có hướng dẫn test và ít nhất một reviewer, không commit trực tiếp main. Việc merge nhánh thành viên, tạo repository báo cáo và benchmark Colab thực hiện khi có module/quyền truy cập tương ứng.

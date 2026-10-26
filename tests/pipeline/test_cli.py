@@ -85,7 +85,7 @@ class CLITests(TestCase):
             self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
         stages = json.loads((self.output / "manifests/stages.json").read_text())
         self.assertEqual([s["status"] for s in stages],
-                         ["not_implemented", "skipped"] * 2 + ["not_implemented", "success", "not_implemented"])
+                         ["not_implemented", "skipped"] * 2 + ["success", "success", "not_implemented"])
 
     def test_invalid_config(self):
         client, _ = fixture_client()
