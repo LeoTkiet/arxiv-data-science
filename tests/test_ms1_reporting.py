@@ -4,6 +4,9 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import time
+import psutil
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
@@ -91,6 +94,13 @@ class StatisticsTests(unittest.TestCase):
         report = self.summarize()
         self.assertEqual(report['rates']['reference_nonempty_success']['value'], 0)
 
+    def test_pdf_only_skip_is_not_failure_but_upstream_error_is(self):
+        self.assertEqual(self.summarize()['failure_causes'], {})
+        self.stage('download', '2301.00002', 1, 'api_error')
+        failures = self.summarize()['failure_causes']
+        self.assertIn('download:api_error:unspecified', failures)
+        self.assertIn('extract:skipped:unspecified', failures)
+
 
 class ExportTests(unittest.TestCase):
     def test_export_keeps_evidence_and_removes_machine_paths(self):
@@ -118,6 +128,83 @@ class ExportTests(unittest.TestCase):
 
 
 class BenchmarkTests(unittest.TestCase):
+    def test_failed_new_run_does_not_publish_previous_manifest_statistics(self):
+        from arxiv_pipeline.reporting.milestone1.benchmark import main
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output, results = root / 'data', root / 'results'
+            atomic_json(output / 'manifests/discovery.json', [
+                dict(input_id='old-invalid-id', arxiv_id=None, status='invalid_id', versions=[])])
+            code = main(['--output', str(output), '--results', str(results), '--',
+                         '--ids', '2508.12872', '--timeout', '-1'])
+            self.assertEqual(code, 2)
+            self.assertFalse((results / 'statistics.json').exists())
+            self.assertEqual(json.loads((results / 'benchmark.json').read_text())['statistics_status'],
+                             'unavailable_current_run')
+
+    def test_completed_run_with_failed_id_still_publishes_current_statistics(self):
+        from arxiv_pipeline.reporting.milestone1.benchmark import main
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            code = main(['--output', str(root / 'data'), '--results', str(root / 'results'), '--',
+                         '--ids', 'deliberately-invalid-id'])
+            self.assertEqual(code, 1)
+            summary = json.loads((root / 'results/statistics.json').read_text())
+            benchmark = json.loads((root / 'results/benchmark.json').read_text())
+            self.assertEqual(summary['discovery_statuses'], {'invalid_id': 1})
+            self.assertEqual(benchmark['statistics_status'], 'current_run')
+            self.assertEqual(summary['run_id'], benchmark['run_id'])
+
+    def test_partial_timing_line_preserves_benchmark_and_valid_events(self):
+        from arxiv_pipeline.reporting.milestone1.benchmark import measure
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            timing = root / 'results/timings.jsonl'
+            valid = json.dumps(dict(kind='paper', paper_id='2301.00001', input_id='2301.00001', elapsed_seconds=1))
+            malformed = json.dumps(dict(kind='paper', paper_id=['bad-type'], elapsed_seconds=1))
+            content = valid + '\n' + malformed + '\n{"kind":"paper"'
+            script = f'from pathlib import Path; Path({str(timing)!r}).write_text({content!r})'
+            report = measure([sys.executable, '-c', script], root / 'data', root / 'results', interval=.02)
+            self.assertTrue((root / 'results/benchmark.json').exists())
+            self.assertEqual(report['timings']['event_count'], 1)
+            self.assertEqual(report['timings']['diagnostics'][0]['line'], 2)
+            self.assertEqual(len(report['timings']['diagnostics']), 2)
+
+    def test_interrupt_terminates_tracked_child_after_root_exit(self):
+        from arxiv_pipeline.reporting.milestone1.benchmark import measure
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pidfile, parentfile = root / 'child.pid', root / 'parent.pid'
+            child = 'import time; time.sleep(30)'
+            script = ('import subprocess,sys,time,os; from pathlib import Path; '
+                      f'Path({str(parentfile)!r}).write_text(str(os.getpid())); '
+                      f'p=subprocess.Popen([sys.executable,"-c",{child!r}]); '
+                      f'Path({str(pidfile)!r}).write_text(str(p.pid)); time.sleep(0.3)')
+            real_sleep, sent = time.sleep, False
+
+            def interrupt_after_root_exit(seconds):
+                nonlocal sent
+                if not sent and parentfile.exists() and not psutil.pid_exists(int(parentfile.read_text())):
+                    sent = True
+                    raise KeyboardInterrupt
+                real_sleep(seconds)
+
+            try:
+                with patch('arxiv_pipeline.reporting.milestone1.benchmark.time.sleep', side_effect=interrupt_after_root_exit):
+                    report = measure([sys.executable, '-c', script], root / 'data', root / 'results', interval=.02)
+                self.assertTrue(sent)
+                self.assertEqual(report['exit_code'], 130)
+                pid = int(pidfile.read_text())
+                self.assertFalse(psutil.pid_exists(pid) and psutil.Process(pid).status() != psutil.STATUS_ZOMBIE)
+            finally:
+                if pidfile.exists():
+                    try:
+                        process = psutil.Process(int(pidfile.read_text()))
+                        process.kill()
+                        psutil.wait_procs([process], timeout=3)
+                    except psutil.NoSuchProcess:
+                        pass
+
     def test_measure_real_process_failure_disk_and_samples(self):
         from arxiv_pipeline.reporting.milestone1.benchmark import measure
         with tempfile.TemporaryDirectory() as temporary:
@@ -187,3 +274,36 @@ class TimingTests(unittest.TestCase):
             events.clear()
             run(['2301.00001'], Path(temporary), client=client, resume=True, observer=events.append)
             self.assertTrue(events[0]['cached'])
+
+
+class CorpusAuditTests(unittest.TestCase):
+    def test_audit_assignment_includes_unseen_ids_not_just_manifest(self):
+        from test_validation import ValidationTests
+        from arxiv_pipeline.reporting.milestone1.audit import audit
+        case = ValidationTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        atomic_json(case.output / 'state/discovery/fixture.json', case.record)
+        assignment = {'ranges': [{'range': '2301.00001:2301.00002'}]}
+        report = audit(case.output, assignment)
+        self.assertFalse(report['audit_complete'])
+        self.assertEqual(report['assigned_input_count'], 2)
+        self.assertEqual(report['unseen_ids'], ['2301.00002'])
+        self.assertEqual(report['validation_pass_papers'], 1)
+        self.assertEqual(report['validation_fail_papers'], 0)
+
+    def test_audit_catches_real_missing_file_and_reports_not_found_separately(self):
+        from test_validation import ValidationTests
+        from arxiv_pipeline.reporting.milestone1.audit import audit
+        case = ValidationTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        atomic_json(case.output / 'state/discovery/fixture.json', case.record)
+        atomic_json(case.output / 'state/discovery/absent.json',
+                    dict(arxiv_id='2301.00002', input_id='2301.00002', status='not_found', versions=[]))
+        (case.output / 'corpus/2301.00001/v1/main.tex').unlink()
+        report = audit(case.output, {'ranges': [{'range': '2301.00001:2301.00002'}]})
+        self.assertFalse(report['audit_complete'])
+        self.assertEqual(report['unseen_ids'], [])
+        self.assertEqual(report['validation_fail_papers'], 1)
+        self.assertEqual(report['discovery_statuses']['not_found'], 1)

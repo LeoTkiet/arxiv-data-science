@@ -73,7 +73,8 @@ def summarize(output_dir):
             dl, ex = stage('download', paper, number), stage('extract', paper, number)
             row = dict(paper_id=paper, version=number, download=dl['status'], extract=ex['status'])
             for name, doc in (('download', dl), ('extract', ex)):
-                if doc['status'] not in {'success', 'no_source'}:
+                expected_skip = name == 'extract' and doc['status'] == 'skipped' and dl['status'] == 'no_source'
+                if doc['status'] not in {'success', 'no_source'} and not expected_skip:
                     error = doc.get('error') or {}
                     failures[f'{name}:{doc["status"]}:{error.get("kind", "unspecified")}'] += 1
             download_meta = read(f'raw/{key}/v{number}/download_metadata.json') if dl['status'] == 'success' else None

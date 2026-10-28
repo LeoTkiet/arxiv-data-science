@@ -10,6 +10,8 @@ import statistics
 import subprocess
 import sys
 import time
+import hashlib
+from uuid import uuid4
 
 import psutil
 
@@ -34,10 +36,33 @@ def disk_bytes(directory):
 
 
 def timing_summary(path):
-    events = []
+    events, diagnostics = [], []
     if path.exists():
-        for line in path.read_text(encoding='utf-8').splitlines():
-            events.append(json.loads(line))
+        try:
+            lines = path.read_text(encoding='utf-8').splitlines()
+        except (OSError, UnicodeError) as exc:
+            lines = []
+            diagnostics.append(dict(line=None, error=str(exc)))
+        for number, line in enumerate(lines, 1):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+                if not isinstance(event, dict) or event.get('kind') not in {'discovery', 'stage', 'paper'}:
+                    raise ValueError('Invalid timing event kind')
+                elapsed = event.get('elapsed_seconds')
+                if type(elapsed) not in {int, float} or not math.isfinite(elapsed) or elapsed < 0:
+                    raise ValueError('Invalid elapsed_seconds')
+                if event['kind'] == 'stage' and not isinstance(event.get('stage'), str):
+                    raise ValueError('Stage name is missing')
+                for field in ('paper_id', 'input_id'):
+                    if event.get(field) is not None and not isinstance(event[field], str):
+                        raise ValueError(f'Invalid {field}')
+                if event['kind'] == 'paper' and not (event.get('paper_id') or event.get('input_id')):
+                    raise ValueError('Paper identity is missing')
+                events.append(event)
+            except (ValueError, TypeError) as exc:
+                diagnostics.append(dict(line=number, error=str(exc)))
     papers = [e for e in events if e['kind'] == 'paper']
     stages = {}
     for event in events:
@@ -51,7 +76,51 @@ def timing_summary(path):
     return dict(discovery_total_seconds=sum(e['elapsed_seconds'] for e in events if e['kind'] == 'discovery'),
                 stage_seconds=stages, per_paper_seconds=per_paper,
                 mean_paper_seconds=statistics.mean(per_paper.values()) if per_paper else None,
-                cached_events=sum(bool(e.get('cached')) for e in events), event_count=len(events))
+                cached_events=sum(bool(e.get('cached')) for e in events), event_count=len(events),
+                diagnostics=diagnostics)
+
+
+def current_snapshot(output, run_id):
+    """Verify current-run receipt and hashes, including on a completed exit=1 run."""
+    receipt = json.loads((output / 'manifests/run.json').read_text(encoding='utf-8'))
+    expected = ('manifests/discovery.json', 'manifests/stages.json', 'summary.json')
+    if receipt.get('run_id') != run_id:
+        raise ValueError('No completed snapshot for this run_id; previous manifest is not current data')
+    for name in expected:
+        digest = hashlib.sha256((output / name).read_bytes()).hexdigest()
+        if receipt.get('sha256', {}).get(name) != digest:
+            raise ValueError(f'Snapshot hash mismatch: {name}')
+    return receipt
+
+
+def terminate_tracked(process, tracked):
+    """Stop observed descendants even if their original parent has disappeared."""
+    candidates = dict(tracked)
+    if process is not None:
+        try:
+            root = psutil.Process(process.pid)
+            candidates.update((child.pid, child) for child in root.children(recursive=True))
+            candidates[root.pid] = root
+        except psutil.NoSuchProcess:
+            pass
+    errors = []
+    for child in candidates.values():
+        try:
+            child.terminate()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied as exc:
+            errors.append(str(exc))
+    _, alive = psutil.wait_procs(list(candidates.values()), timeout=3)
+    for child in alive:
+        try:
+            child.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.AccessDenied as exc:
+            errors.append(str(exc))
+    _, remaining = psutil.wait_procs(alive, timeout=3)
+    return dict(errors=errors, remaining_pids=[child.pid for child in remaining])
 
 
 def measure(command, output_dir, results_dir, *, interval=0.1, label='live_unverified'):
@@ -141,21 +210,11 @@ def measure(command, output_dir, results_dir, *, interval=0.1, label='live_unver
     except OSError as exc:
         report['exit_code'] = 127
         report['launch_error'] = str(exc)
+        report['cleanup'] = terminate_tracked(process, tracked)
     except KeyboardInterrupt:
         report['exit_code'] = 130
         report['interrupted'] = True
-        if process:
-            try:
-                root = psutil.Process(process.pid)
-                descendants = root.children(recursive=True)
-                for child in descendants:
-                    child.terminate()
-                root.terminate()
-                _, alive = psutil.wait_procs([root, *descendants], timeout=3)
-                for child in alive:
-                    child.kill()
-            except psutil.NoSuchProcess:
-                pass
+        report['cleanup'] = terminate_tracked(process, tracked)
     finally:
         report.setdefault('wall_seconds', time.perf_counter() - started)
         rss_samples = [s['rss_bytes'] for s in samples if s['rss_bytes'] is not None]
@@ -188,32 +247,35 @@ def main(argv=None):
     parser.add_argument('pipeline_args', nargs=argparse.REMAINDER, help='After --: pipeline --ids/--input/--range/--resume options')
     args = parser.parse_args(argv)
     forwarded = args.pipeline_args[1:] if args.pipeline_args[:1] == ['--'] else args.pipeline_args
-    if any(a.split('=', 1)[0] in {'--output', '--timings', '--stage'} for a in forwarded):
+    if any(a.split('=', 1)[0] in {'--output', '--timings', '--stage', '--run-id'} for a in forwarded):
         parser.error('Output, timings and crawl stage are managed by this wrapper')
     timings = args.results.resolve() / 'timings.jsonl'
+    run_id = str(uuid4())
     if args.demo:
         if forwarded:
             parser.error('Demo has its own synthetic inputs; omit pipeline arguments')
         demo = Path(__file__).resolve().parents[4] / 'scripts/demo_ms1.py'
-        command = [sys.executable, str(demo), '--output', str(args.output.resolve()), '--timings', str(timings)]
+        command = [sys.executable, str(demo), '--output', str(args.output.resolve()), '--timings', str(timings),
+                   '--run-id', run_id]
     else:
         command = [sys.executable, '-m', 'arxiv_pipeline.main', '--output', str(args.output.resolve()),
-                   '--stage', 'crawl', '--timings', str(timings), *forwarded]
+                   '--stage', 'crawl', '--timings', str(timings), '--run-id', run_id, *forwarded]
     report = measure(command, args.output, args.results, interval=args.interval,
                      label='synthetic_demo' if args.demo else 'live_unverified')
-    # Preserve metrics on failed runs; incomplete pipeline outputs remain explicit.
-    if (args.output / 'manifests/discovery.json').exists():
+    report['run_id'] = run_id
+    try:
+        report['snapshot'] = current_snapshot(args.output.resolve(), run_id)
         from .statistics import summarize
-        try:
-            summary = summarize(args.output)
-            summary['label'] = report['label']
-            atomic_json(args.results / 'statistics.json', summary)
-        except (ValueError, OSError) as exc:
-            atomic_json(args.results / 'statistics_error.json', {'error': str(exc)})
-            if report['exit_code'] == 0:
-                return 1
+        summary = summarize(args.output)
+        summary.update(label=report['label'], run_id=run_id)
+        atomic_json(args.results / 'statistics.json', summary)
+        report['statistics_status'] = 'current_run'
+    except (ValueError, OSError, TypeError, AttributeError) as exc:
+        report['statistics_status'] = 'unavailable_current_run'
+        atomic_json(args.results / 'statistics_error.json', {'error': str(exc), 'run_id': run_id})
+    atomic_json(args.results / 'benchmark.json', report)
     print(f"Benchmark saved to {args.results}; pipeline exit={report['exit_code']}")
-    return report['exit_code']
+    return report['exit_code'] or (1 if report['statistics_status'] != 'current_run' else 0)
 
 
 if __name__ == '__main__':

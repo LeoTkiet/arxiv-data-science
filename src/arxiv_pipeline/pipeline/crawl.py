@@ -7,6 +7,7 @@ import json
 import logging
 from time import perf_counter
 from pathlib import Path
+from uuid import uuid4
 
 from arxiv_pipeline.common.schemas import SCHEMA_VERSION, StageResult, ErrorInfo
 from arxiv_pipeline.common.utils import atomic_json, utc_now, paper_key
@@ -102,7 +103,8 @@ def _run_stage(stage, record, output, version, upstream, resume, observer=None):
     return serialized
 
 
-def run(identifiers, output: Path, *, client=None, resume=False, full=False, observer=None):
+def run(identifiers, output: Path, *, client=None, resume=False, full=False, observer=None, run_id=None):
+    run_id = run_id or str(uuid4())
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     client = client or ArxivClient()
@@ -144,10 +146,15 @@ def run(identifiers, output: Path, *, client=None, resume=False, full=False, obs
     bad |= any(s["status"] not in {"success", "no_source", "not_indexed", "no_data"}
                and not (s["status"] == "skipped" and s.get("error", {}).get("message") == "download status: no_source")
                for s in stages)
-    summary = {"schema_version": SCHEMA_VERSION, "timestamp": utc_now(), "mode": "crawl" if full else "discovery",
+    summary = {"schema_version": SCHEMA_VERSION, "run_id": run_id, "timestamp": utc_now(), "mode": "crawl" if full else "discovery",
                "papers": len({r["arxiv_id"] for r in records if r["arxiv_id"]}), "inputs": len(records),
                "versions": sum(len(r["versions"]) for r in records if r["status"] == "success"),
                "discovery_statuses": dict(Counter(r["status"] for r in records)),
                "stage_statuses": dict(Counter(s["status"] for s in stages)), "complete": not bad}
     atomic_json(output / "summary.json", summary)
+    # Commit receipt only after all snapshots are written. A previous receipt cannot
+    # authenticate a failed/interrupted current run, even with a reused output root.
+    atomic_json(output / 'manifests/run.json', dict(run_id=run_id, sha256={
+        relative: hashlib.sha256((output / relative).read_bytes()).hexdigest()
+        for relative in ('manifests/discovery.json', 'manifests/stages.json', 'summary.json')}))
     return summary

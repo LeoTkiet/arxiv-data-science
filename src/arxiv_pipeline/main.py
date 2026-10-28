@@ -37,6 +37,7 @@ def main(argv=None, *, client=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage", choices=["discovery", "crawl"], default="discovery")
     parser.add_argument("--timings", type=Path, help="Optional JSONL timing events for TV5 (overwritten per run)")
+    parser.add_argument('--run-id', help=argparse.SUPPRESS)
     restart = parser.add_mutually_exclusive_group()
     restart.add_argument("--resume", action="store_true", help="Reuse complete checkpoints; retry failed records")
     restart.add_argument("--force", action="store_true", help="Refresh discovery and rerun all adapters")
@@ -73,7 +74,8 @@ def main(argv=None, *, client=None):
             timing_stream.flush()
 
         summary = run(identifiers, args.output, client=client or ArxivClient(config),
-                      resume=args.resume, full=args.stage == "crawl", observer=observe if timing_stream else None)
+                      resume=args.resume, full=args.stage == "crawl", observer=observe if timing_stream else None,
+                      run_id=args.run_id)
     except (OSError, KeyboardInterrupt) as exc:
         logger.error("Run interrupted; checkpoints can be resumed: %s", exc)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1

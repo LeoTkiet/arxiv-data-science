@@ -77,10 +77,11 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True)
     parser.add_argument('--timings', required=True)
+    parser.add_argument('--run-id', required=True)
     args = parser.parse_args()
     with patch('arxiv_pipeline.crawling.downloader._DOWNLOADER', ArxivDownloader(session=FixtureSession())), \
             patch('arxiv_pipeline.crawling.s2.s2_source.S2Source.fetch', new=reference_fetch):
         # Includes one deliberately missing discovery result to exercise partial failure.
         raise SystemExit(main(['--ids', '2301.00001', '2301.00002', '2301.00003', '--stage', 'crawl',
-                               '--output', args.output, '--timings', args.timings],
+                               '--output', args.output, '--timings', args.timings, '--run-id', args.run_id],
                               client=ArxivClient(opener=opener, sleep=lambda _: None)))

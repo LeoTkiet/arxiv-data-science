@@ -21,6 +21,9 @@ def export_run(run_dir, book_dir, name):
     summary = json.loads(payloads['statistics.json'])
     if benchmark['label'] != summary['label']:
         raise ValueError('Benchmark/statistics run labels disagree')
+    if benchmark.get('run_id') and (benchmark.get('statistics_status') != 'current_run'
+                                    or summary.get('run_id') != benchmark['run_id']):
+        raise ValueError('Statistics do not belong to this completed benchmark run')
     # Public book needs measurements, not local machine paths/argv.
     for field in ('command', 'output_dir'):
         benchmark.pop(field, None)
