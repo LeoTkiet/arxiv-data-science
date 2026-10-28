@@ -1,5 +1,18 @@
 # arxiv-data-science
 
+## TV5 — MS1 benchmark và báo cáo
+
+Hướng dẫn đầy đủ, công thức và giới hạn phép đo tại [docs/TV5_MS1_GUIDE.md](docs/TV5_MS1_GUIDE.md). Module mới nằm trong `src/arxiv_pipeline/reporting/milestone1/`; không thay đổi phần MS2.
+
+```powershell
+python -m pip install -e ".[reporting,dev]"
+python -m arxiv_pipeline.reporting.milestone1.benchmark --output data/ms1 --results artifacts/ms1-run -- --ids 2508.12872
+python -m arxiv_pipeline.reporting.milestone1.export --run artifacts/ms1-run --book ../arxiv-project-report --name local-smoke
+python -m pytest -q
+```
+
+Input assignment nhóm 6 ở `configs/ms1_group6_ranges.json` (25.000 ID lookup). Benchmark cuối cần Colab CPU-only; smoke local/demo không thay thế số đo nghiệm thu. Mỗi results mới, nằm ngoài output; `--resume` phải ghi nhãn điều kiện chạy. Repository Jupyter Book là thư mục/repo riêng `arxiv-project-report`, notebook Colab và workflow nằm ở đó.
+
 Phần bàn giao TV1: cấu trúc project MS1–MS3, Discovery mọi version, hợp đồng dữ liệu v1 và CLI điều phối có checkpoint/resume. Python **3.10+**, runtime TV1 chỉ dùng standard library.
 
 ```powershell

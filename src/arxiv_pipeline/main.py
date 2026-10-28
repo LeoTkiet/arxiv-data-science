@@ -36,6 +36,7 @@ def main(argv=None, *, client=None):
                         metavar="START:END", help="Inclusive range within one month; may repeat")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--stage", choices=["discovery", "crawl"], default="discovery")
+    parser.add_argument("--timings", type=Path, help="Optional JSONL timing events for TV5 (overwritten per run)")
     restart = parser.add_mutually_exclusive_group()
     restart.add_argument("--resume", action="store_true", help="Reuse complete checkpoints; retry failed records")
     restart.add_argument("--force", action="store_true", help="Refresh discovery and rerun all adapters")
@@ -61,13 +62,24 @@ def main(argv=None, *, client=None):
     except ValueError as exc:
         parser.error(str(exc))
     logger = configure_logging(args.output)
+    timing_stream = None
     try:
+        if args.timings:
+            args.timings.parent.mkdir(parents=True, exist_ok=True)
+            timing_stream = args.timings.open('w', encoding='utf-8')
+
+        def observe(event):
+            timing_stream.write(json.dumps(event, ensure_ascii=False) + '\n')
+            timing_stream.flush()
+
         summary = run(identifiers, args.output, client=client or ArxivClient(config),
-                      resume=args.resume, full=args.stage == "crawl")
+                      resume=args.resume, full=args.stage == "crawl", observer=observe if timing_stream else None)
     except (OSError, KeyboardInterrupt) as exc:
         logger.error("Run interrupted; checkpoints can be resumed: %s", exc)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
     finally:
+        if timing_stream:
+            timing_stream.close()
         close_logging(logger)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0 if summary["complete"] else 1

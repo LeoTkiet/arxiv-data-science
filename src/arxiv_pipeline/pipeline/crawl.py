@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import json
 import logging
+from time import perf_counter
 from pathlib import Path
 
 from arxiv_pipeline.common.schemas import SCHEMA_VERSION, StageResult, ErrorInfo
@@ -54,7 +55,8 @@ def _artifacts_exist(result, output):
         return False
 
 
-def _run_stage(stage, record, output, version, upstream, resume):
+def _run_stage(stage, record, output, version, upstream, resume, observer=None):
+    started = perf_counter()
     number = version["version"] if version else None
     path = output / "state/stages" / stage / paper_key(record["arxiv_id"]) / f"{number or 'paper'}.json"
     cached = _read(path) if resume else None
@@ -66,6 +68,9 @@ def _run_stage(stage, record, output, version, upstream, resume):
             and cached.get("status") in {"success", "no_source", "not_indexed", "no_data"}
             and _artifacts_exist(cached, output)):
         if cached["status"] != "success" or cached.get("artifacts"):
+            if observer:
+                observer(dict(kind='stage', stage=stage, paper_id=record['arxiv_id'], version=number,
+                              status=cached['status'], cached=True, elapsed_seconds=perf_counter() - started))
             return cached
     if upstream and upstream["status"] != "success":
         result = StageResult(stage, record["arxiv_id"], number, "skipped", utc_now(),
@@ -91,33 +96,48 @@ def _run_stage(stage, record, output, version, upstream, resume):
                                  error=ErrorInfo(type(exc).__name__, str(exc)))
     serialized = result.to_dict()
     atomic_json(path, serialized)
+    if observer:
+        observer(dict(kind='stage', stage=stage, paper_id=record['arxiv_id'], version=number,
+                      status=serialized['status'], cached=False, elapsed_seconds=perf_counter() - started))
     return serialized
 
 
-def run(identifiers, output: Path, *, client=None, resume=False, full=False):
+def run(identifiers, output: Path, *, client=None, resume=False, full=False, observer=None):
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     client = client or ArxivClient()
     records, stages = [], []
     for identifier in dict.fromkeys(identifiers):
+        paper_started = perf_counter()
+        discovery_started = perf_counter()
         key = hashlib.sha256(identifier.encode("utf-8")).hexdigest()
         checkpoint = output / "state/discovery" / f"{key}.json"
         record = _read(checkpoint) if resume else None
-        if not _complete_discovery(record, identifier):
+        cached = _complete_discovery(record, identifier)
+        if not cached:
             record = discover(identifier, client).to_dict()
             atomic_json(checkpoint, record)
         else:
             LOG.info("Resume discovery: %s", identifier)
+        if observer:
+            observer(dict(kind='discovery', paper_id=record['arxiv_id'], input_id=identifier,
+                          status=record['status'], cached=cached, elapsed_seconds=perf_counter() - discovery_started))
         records.append(record)
         LOG.info("Discovery %s: %s (%d versions)", identifier, record["status"], len(record["versions"]))
         if not full or record["status"] != "success":
+            if observer:
+                observer(dict(kind='paper', paper_id=record['arxiv_id'], input_id=identifier,
+                              elapsed_seconds=perf_counter() - paper_started))
             continue
         for version in record["versions"]:
-            downloaded = _run_stage("download", record, output, version, None, resume)
+            downloaded = _run_stage("download", record, output, version, None, resume, observer)
             stages.append(downloaded)
-            stages.append(_run_stage("extract", record, output, version, downloaded, resume))
+            stages.append(_run_stage("extract", record, output, version, downloaded, resume, observer))
         for stage in ("metadata", "references", "validate"):
-            stages.append(_run_stage(stage, record, output, None, None, resume))
+            stages.append(_run_stage(stage, record, output, None, None, resume, observer))
+        if observer:
+            observer(dict(kind='paper', paper_id=record['arxiv_id'], input_id=identifier,
+                          elapsed_seconds=perf_counter() - paper_started))
     atomic_json(output / "manifests/discovery.json", records)
     atomic_json(output / "manifests/stages.json", stages)
     bad = any(r["status"] != "success" for r in records)
