@@ -100,4 +100,37 @@ Một reference:
 
 Stage `metadata` (`crawling/metadata.py`) không gọi mạng: nó kiểm tra record Discovery, chuẩn hoá và ghi `metadata/<paper_key>.json`. Cấp paper có đúng các cột bảng `papers` (`arxiv_id`, `title`, `authors`, `submission_date` từ v1, `revised_dates` từ v2..vn, `venue` từ `journal_ref`, có thể `null`) cùng `abstract`, `categories`, `doi`, `source`, `retrieved_at`. Mỗi phần tử của `versions[]` có metadata riêng của version đó (`title`, `authors`, `venue`, `submission_date`, `updated_date`). Giá trị thiếu là `null`/`[]` và được ghi trong `missing_fields`; không suy đoán. Record không hợp lệ cho `data_error`, không ghi file. Test: `python -m unittest tests.crawling.test_metadata -v`.
 
+## Validator (TV5)
+
+Stage `validate` đã được triển khai trong `src/arxiv_pipeline/export/validation.py` và tự chạy cuối mỗi paper khi dùng `--stage crawl`:
+
+```powershell
+python main.py --input ids.txt --output data --stage crawl --resume
+python -m unittest discover -s tests -p test_validation.py -v
+```
+
+Validator đọc checkpoint tại `state/stages/`, không phụ thuộc manifest tổng hợp vốn chỉ được ghi sau khi toàn pipeline kết thúc. Kiểm tra gồm danh sách version, artifact/đường dẫn, source/checksum SHA-256 nếu sidecar có ghi, corpus `.tex`/`.bib`, metadata so với Discovery và schema/reference trùng. Cho phép sidecar `extract_metadata.json`. Không sửa corpus hay gọi API.
+
+Kết quả là `validation/<paper_key>.json`: `valid`, `counts`, `outcomes`, `errors`, `warnings`, `duplicate_files`. Mỗi lỗi có paper ID, version nếu áp dụng, đường dẫn, mã lỗi và mô tả. Dữ liệu không hợp lệ trả `StageResult.status=data_error`; JSON chẩn đoán vẫn được lưu. `success` của validator chỉ có nghĩa kết quả nhất quán: `no_source`, `no_data`, `not_indexed` vẫn được giữ riêng; không được dùng `validate=success` để tính tỷ lệ tải source thành công. Source trùng nội dung là cảnh báo vì các version có thể dùng chung nội dung; references trùng định danh là lỗi.
+
+`--resume` có thể dùng lại validation đã thành công; nó không buộc kiểm tra lại nội dung. `--force` chạy lại cả pipeline và có thể tải lại dữ liệu. Để chỉ kiểm tra lại dữ liệu đã có, gọi adapter trực tiếp từ Python, tại repo root:
+
+```python
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path('src').resolve()))
+from arxiv_pipeline.export.validation import run
+
+output = Path('data')
+records = json.loads((output / 'manifests/discovery.json').read_text(encoding='utf-8'))
+for record in records:
+    if record['status'] == 'success':
+        result = run(record, output)
+        print(result.paper_id, result.status, result.artifacts)
+```
+
+Sau một lần chạy bị gián đoạn, có thể đọc record từ `state/discovery/*.json` thay manifest. Gọi trực tiếp chỉ cập nhật báo cáo validation, không cập nhật checkpoint validate hay summary của orchestrator. Chạy kiểm tra sau khi tiến trình ghi corpus đã dừng. Benchmark tài nguyên và báo cáo Jupyter Book là các phần riêng, chưa nằm trong validator.
+
 Quy trình nhóm: tạo issue có người phụ trách, input/output và tiêu chí nghiệm thu; làm trên nhánh `feature/...` theo kế hoạch nhóm, PR có hướng dẫn test và ít nhất một reviewer, không commit trực tiếp main. Việc merge nhánh thành viên, tạo repository báo cáo và benchmark Colab thực hiện khi có module/quyền truy cập tương ứng.
