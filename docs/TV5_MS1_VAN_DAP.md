@@ -4,6 +4,8 @@ Tài liệu học dựa trên code được triển khai ngày 28/10/2026. Khôn
 
 ## 1. Giới thiệu phần việc trong khoảng một phút
 
+**Cập nhật sau review:** bốn lỗi đã sửa; pytest 129 test và 38 subtest qua. Đã đo mẫu Colab CPU-only từ commit sạch `0f8d83b`: một paper, một version, 97 references, validator pass; wall 21,511 giây, peak RSS 41.771.008 bytes. Audit đối chiếu 25.000 ID nhưng chỉ có dữ liệu của một ID; còn 24.999 ID chưa crawl. Vì vậy tỷ lệ thành công 100% của mẫu không phải tỷ lệ thành công toàn assignment.
+
 “Em phụ trách TV5: kiểm tra chất lượng corpus, đo hiệu năng và tổng hợp báo cáo. Em dùng đầu ra của discovery, downloader, extractor và metadata/references để kiểm tra đủ version, schema, file và trạng thái. Em viết wrapper chạy pipeline ở tiến trình riêng, đo wall time, lấy mẫu RAM của cả cây tiến trình và dung lượng thư mục output, đồng thời ghi thời gian từng paper và từng bước. Sau đó em tính thống kê với tử số/mẫu số rõ ràng, xuất JSON và dùng notebook sinh bảng, biểu đồ khi build Jupyter Book. Em tách dữ liệu demo với benchmark thực tế và chuẩn bị notebook tái lập trên Colab CPU-only.”
 
 ## 2. Các file chính và trách nhiệm
@@ -170,7 +172,7 @@ Một repo source cho dự án; một repo book riêng cho MS1 và MS2. Việc t
 
 **Có thể nói streaming luôn RAM dưới 25 MB không?** Không. Tổng RAM phụ thuộc Python, thư viện, archive, extractor, validator và dữ liệu. Phải đo hệ thống thật.
 
-**Book build được có nghĩa đã hoàn thành MS1 không?** Chưa. Còn nghiệm thu corpus, benchmark Colab CPU-only và website public.
+**Book build được có nghĩa đã hoàn thành MS1 không?** Chưa. Đã có website và mẫu benchmark Colab CPU-only; vẫn cần thu thập/kiểm chứng toàn corpus và review của nhóm.
 
 ## 15. Tự học theo thứ tự
 
@@ -181,6 +183,15 @@ Một repo source cho dự án; một repo book riêng cho MS1 và MS2. Việc t
 - Code validator có trước; phần MS1 reporting, fixtures, notebooks và workflow đã được bổ sung trong nhiệm vụ hiện tại.
 - Demo offline đã chạy, book đã build và thực thi notebook. Demo không phải benchmark Colab hay kết quả toàn assignment.
 - Lượt smoke ban đầu bị WinError 10013 trong sandbox; thử lại có mạng đã thành công với `2508.12872`, một version và 97 references, validator pass. Số đo local này chưa phải Colab.
-- Unittest 112 test qua; pytest 122 test và 38 subtest qua. Xem link/trạng thái publish cuối trong `TV5_MS1_KET_QUA.md`; không coi toàn assignment/Colab đã xong.
+- Sau review: pytest 129 test và 38 subtest qua; mẫu Colab CPU-only một paper đã chạy. Xem trạng thái cuối trong `TV5_MS1_KET_QUA.md`; toàn assignment chưa đủ.
+
+## 17. Bốn lỗi sau review cần giải thích khi vấn đáp
+
+1. **Vì sao cần run ID và receipt?** Manifest có thể còn của lượt cũ khi lượt mới dừng sớm. UUID nối wrapper với pipeline; receipt chỉ ghi sau khi kết thúc và chứa hash snapshot. Không khớp thì không xuất statistics của lượt cũ.
+2. **JSONL bị ghi dở thì sao?** Giữ các event hợp lệ, chẩn đoán dòng lỗi và vẫn ghi benchmark. Không coi event thiếu duration là thời gian đầy đủ.
+3. **PDF-only có phải lỗi extractor không?** Khi downloader báo no_source thì extractor skipped là outcome dự kiến. Skipped vì upstream api_error vẫn được tính trong nguyên nhân lỗi.
+4. **Vì sao root process chết chưa đủ để kết thúc cleanup?** Child đã quan sát có thể còn sống sau root. Cần giữ các process đã theo dõi, terminate/wait/kill và báo PID còn lại.
+
+Module audit đi qua toàn danh sách input, đối chiếu discovery/checkpoint và gọi validator trên phần có dữ liệu. `unseen` khác `not_found`: chưa crawl không chứng minh paper không tồn tại. Excel chỉ là đầu vào range, không phải corpus.
 
 Nguồn: [đề MS1](https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling/), [psutil](https://psutil.readthedocs.io/en/latest/), [perf_counter](https://docs.python.org/3/library/time.html#time.perf_counter), [Jupyter Book execution](https://jupyterbook.org/v1/content/execute.html), `docs/CONTRACTS.md`, code đã triển khai và báo cáo TV2. Đề/Moodle là căn cứ yêu cầu cuối cùng.

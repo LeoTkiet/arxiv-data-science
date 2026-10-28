@@ -56,7 +56,25 @@ Không chạy cùng lúc với tiến trình đang ghi corpus. `--revalidate` c�
 
 Sao chép `benchmark.json`, `statistics.json`, `samples.jsonl`, `timings.jsonl` sang `summaries/milestone1/<run-name>/` của repository báo cáo; không sao chép corpus hoặc secrets. Đặt `TV5_RUN` theo tên run khi build. Xem README của report để build và deploy.
 
-## Nguồn
+## Bản sửa sau review
+
+- Mỗi lượt benchmark có UUID `run_id`; pipeline ghi `manifests/run.json` sau khi hoàn tất snapshot, kèm SHA-256 của discovery, stages và summary. Wrapper chỉ xuất `statistics.json` khi receipt và hashes khớp lượt hiện tại. Exit 1 vì input/stage lỗi vẫn có thể là snapshot hoàn tất; không dựa riêng vào exit code để loại thống kê.
+- Nếu bị ngắt hoặc CLI lỗi trước snapshot, `benchmark.json` vẫn được lưu, `statistics_status=unavailable_current_run`, và có `statistics_error.json`. Không xuất dữ liệu từ manifest cũ.
+- Timing JSONL sai schema/ghi dở được ghi vào `timings.diagnostics`; vẫn tổng hợp các event hợp lệ và giữ báo cáo tài nguyên.
+- Extraction `skipped` vì download `no_source` là outcome hợp lệ, không nằm trong bảng nguyên nhân lỗi. Skip vì lỗi upstream vẫn là lỗi.
+- Cleanup dọn cả các child đã theo dõi, kể cả khi parent đã thoát; báo `cleanup.remaining_pids` nếu không dọn được hoàn toàn.
+
+Kiểm tra toàn assignment mà không cần crawl lại:
+
+```powershell
+python -m arxiv_pipeline.reporting.milestone1.audit --output data/ms1-group6 --assignment configs/ms1_group6_ranges.json --save artifacts/ms1-assignment-audit.json
+```
+
+Audit đối chiếu toàn bộ ID được giao với checkpoints/manifest hiện có, chạy validator trên các paper discovery success và báo `unseen_ids`, `unresolved_discovery_ids`. Không có record không có nghĩa ID không tồn tại: nó chỉ chưa được xử lý. File Excel là danh sách đầu vào, không phải corpus. Audit exit 1 khi chưa đủ dữ liệu hoặc có lỗi; `not_found` chỉ được xem là lookup đã giải quyết, không phải paper tải thành công.
+
+## Nguồn tham khảo
+
+Mẫu đã chạy trên Google Colab CPU-only ngày 28/10/2026: commit source sạch `0f8d83b591c89cf085f344f5fb59af671ab43b81`, ID `2508.12872`, output mới, exit 0, một version, 97 references, validator pass. Wall 21,511 giây, peak RSS quan sát 41.771.008 bytes. Report run `colab-cpu-sample` giữ số đo và provenance; archive gốc ở `artifacts/TV5_MS1_COLAB_20261028T150644Z.zip` (Git ignored). Audit cả 25.000 ID xác nhận còn 24.999 ID chưa có record. Đây là mẫu Colab, chưa nghiệm thu toàn assignment.
 
 - [Đề chính thức MS1](https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling/)
 - [psutil process API](https://psutil.readthedocs.io/en/latest/#process-class)
