@@ -11,7 +11,9 @@ python -m arxiv_pipeline.reporting.milestone1.export --run artifacts/ms1-run --b
 python -m pytest -q
 ```
 
-Input assignment nhóm 6 ở `configs/ms1_group6_ranges.json` (25.000 ID lookup). Benchmark cuối cần Colab CPU-only; smoke local/demo không thay thế số đo nghiệm thu. Mỗi results mới, nằm ngoài output; `--resume` phải ghi nhãn điều kiện chạy. Repository Jupyter Book là thư mục/repo riêng `arxiv-project-report`, notebook Colab và workflow nằm ở đó.
+Input assignment nhóm 6 ở `configs/ms1_group6_ranges.json` (25.000 ID lookup). Benchmark cuối cần Colab CPU-only; smoke local/demo không thay thế số đo nghiệm thu. Mỗi results mới, nằm ngoài output; `--resume` phải ghi nhãn điều kiện chạy. Repository Jupyter Book là thư mục/repo riêng `arxiv-project-report`.
+
+Notebook chạy cho nhóm: [colab/MS1_Benchmark_CPU.ipynb](colab/MS1_Benchmark_CPU.ipynb). Hướng dẫn chọn phạm vi, resume, audit cá nhân/toàn nhóm và kiểm thử: [colab/README.md](colab/README.md). Notebook cố định source commit đã kiểm chứng, giữ kết quả các lượt trước và kiểm run ID/hash trước khi xuất lại thống kê. Workflow build/deploy báo cáo vẫn ở repo Jupyter Book.
 
 Phần bàn giao TV1: cấu trúc project MS1–MS3, Discovery mọi version, hợp đồng dữ liệu v1 và CLI điều phối có checkpoint/resume. Python **3.10+**, runtime TV1 chỉ dùng standard library.
 
