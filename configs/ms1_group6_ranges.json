@@ -1,0 +1,15 @@
+{
+  "group_id": 6,
+  "source_workbook": "[NM.KHDL] 24KHDL Project - Team Registration.xlsx",
+  "source_sheet": "Teams",
+  "excel_date_origin": "1899-12-30",
+  "ranges": [
+    {"source_row": 15, "range": "2508.12872:2508.17871", "count": 5000},
+    {"source_row": 24, "range": "2506.15788:2506.20787", "count": 5000},
+    {"source_row": 56, "range": "2411.08799:2411.13798", "count": 5000},
+    {"source_row": 59, "range": "2410.18025:2410.23024", "count": 5000},
+    {"source_row": 62, "range": "2410.03025:2410.08024", "count": 5000}
+  ],
+  "assigned_input_count": 25000,
+  "note": "Assigned IDs are lookup inputs, not evidence of existing papers or version counts."
+}
