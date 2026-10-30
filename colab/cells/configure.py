@@ -29,20 +29,17 @@ RESULTS_ROOT = base_root / cfg['folder'] / 'artifacts'
 RESULTS = None  # Được tạo tên mới mỗi lần chạy cell benchmark.
 OUTPUT.mkdir(parents=True, exist_ok=True)
 
-# Smart Fast Resume: Tự động phát hiện bài hoàn tất gần nhất để tránh duyệt lại từ đầu
+# Smart Fast Resume: Căn cứ DUY NHẤT vào file validation đã hoàn tất (không tính folder rỗng)
 effective_ranges = list(selected_ranges)
 if AUTO_RESUME and MEMBER_ROLE not in {'ALL_GROUP_25K', 'TEST_SMOKE_1_BAI'} and RESUME_START_ID != 'START':
     full_ids = expand_range(cfg['range'])
     month_prefix = full_ids[0].split('.')[0] + '.'
     val_dir = OUTPUT / 'validation'
-    raw_dir = OUTPUT / 'raw'
     done_ids = []
-    for check_dir in [val_dir, raw_dir]:
-        if check_dir.is_dir():
-            for p in check_dir.glob(f'{month_prefix}*'):
-                name = p.stem if p.is_file() else p.name
-                if name in full_ids:
-                    done_ids.append(name)
+    if val_dir.is_dir():
+        for p in val_dir.glob(f'{month_prefix}*.json'):
+            if p.is_file() and p.stat().st_size > 0 and p.stem in full_ids:
+                done_ids.append(p.stem)
     if done_ids:
         max_done = max(done_ids)
         max_idx = full_ids.index(max_done)
@@ -51,7 +48,7 @@ if AUTO_RESUME and MEMBER_ROLE not in {'ALL_GROUP_25K', 'TEST_SMOKE_1_BAI'} and 
         if new_start in full_ids and full_ids.index(new_start) > 0:
             new_range = f"{new_start}:{full_ids[-1]}"
             effective_ranges = [{'range': new_range}]
-            print(f"🔄 [Smart Fast Resume]: Đã tìm thấy tiến độ đến {max_done}. Tự động lùi 5 bài để tiếp tục từ {new_range} (bỏ qua {target_idx} bài cũ đã tải).")
+            print(f"🔄 [Smart Fast Resume]: Đã thẩm định hoàn tất đến {max_done}. Tự động lùi 5 bài để tiếp tục từ {new_range} (bỏ qua {target_idx} bài cũ đã thẩm định).")
 
 cli_args = [arg for item in effective_ranges for arg in ['--range', item['range']]]
 if AUTO_RESUME:

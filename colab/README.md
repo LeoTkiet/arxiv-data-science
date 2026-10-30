@@ -1,6 +1,10 @@
 # Notebook MS1 CPU-only
 
-Mở `MS1_Benchmark_CPU.ipynb` trên Colab, chọn CPU, chạy setup thành công rồi chọn phạm vi. Source cố định tại commit đã đo/kiểm chứng `0f8d83b591c89cf085f344f5fb59af671ab43b81`. Không tự đổi sang `main` hay bỏ qua test lỗi.
+Mở `MS1_Benchmark_CPU.ipynb` trên Colab, chọn CPU, chạy setup thành công rồi chọn phạm vi. Source cố định tại commit đã đo/kiểm chứng `11ee98b963bb113bd06fc15020130744d9ba3632`. Không tự đổi sang `main` hay bỏ qua test lỗi.
+
+- **Cơ chế Smart Fast Resume**: Khi bật `AUTO_RESUME=True` và `RESUME_START_ID='AUTO'`, notebook tự động quét số bài đã hoàn tất (trong `validation` và `raw`), lùi lại 5 bài đệm để tiếp tục tải ngay lập tức, tránh việc quét lại hàng ngàn bài cũ trên Google Drive.
+- **Tăng tốc Gom lô (Batch Pre-fetch)**: Bật `FAST_BATCH_PREFETCH=True` để tự động chạy gom lô Metadata arXiv (`discovery_batch`) và gom lô trích dẫn Semantic Scholar (`s2.batch`) trong 50–100 IDs/request. Bước này giúp hoàn thành trước toàn bộ metadata và trích dẫn chỉ trong 4 phút, giảm hơn 6.5 giờ chờ mạng.
+- **Thanh tiến trình thời gian thực**: Cell 6 hiển thị trực tiếp số bài đã xong, mã bài hiện tại, tốc độ (s/bài) và thời gian dự kiến (ETA) theo thời gian thực thay vì màn hình đứng im.
 
 - Mỗi lần chạy cell benchmark có UUID riêng trong tên thư mục kết quả. Không xóa kết quả cũ; output corpus/checkpoint giữ nguyên để resume. Tên ZIP cũng chứa tên run duy nhất.
 - Audit cá nhân dùng đúng dải đã chọn, không dùng cả 25.000 ID làm mẫu số cho một thành viên. Smoke chỉ audit một ID. Range là lookup inputs, không bảo đảm có từng ấy publication.

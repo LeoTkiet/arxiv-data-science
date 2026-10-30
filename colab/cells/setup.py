@@ -3,7 +3,7 @@ import os, sys, subprocess, json, datetime, shutil
 
 SOURCE_READY = False
 SOURCE_URL = 'https://github.com/LeoTkiet/arxiv-data-science.git'
-SOURCE_REF = '7eb957563ef584ce957ae537ea9b3730220b6fec'
+SOURCE_REF = '11ee98b963bb113bd06fc15020130744d9ba3632'
 SOURCE = Path('/content/arxiv-data-science')
 if not SOURCE.exists():
     subprocess.run(['git', 'clone', SOURCE_URL, str(SOURCE)], check=True)
