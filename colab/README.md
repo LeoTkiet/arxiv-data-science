@@ -16,7 +16,7 @@ Code của bốn cell chính ở `cells/`. Sau khi sửa, chạy `python scripts
 Tests chạy trực tiếp source cell trong notebook với subprocess giả lập; audit và kiểm tra receipt/hash dùng module thật từ source repo đã cài. Không gọi API, mount Drive hay crawl trong tests:
 
 ```powershell
-python -m pip install -e ".[reporting,dev]"
+python -m pip install -e ../arxiv-data-science[reporting,dev]
 python -m unittest discover -s tests -v
 ```
 
