@@ -1,6 +1,6 @@
 # Notebook MS1 CPU-only
 
-Mở `MS1_Benchmark_CPU.ipynb` trên Colab, chọn CPU, chạy setup thành công rồi chọn phạm vi. Source cố định tại commit đã đo/kiểm chứng `11ee98b963bb113bd06fc15020130744d9ba3632`. Không tự đổi sang `main` hay bỏ qua test lỗi.
+Mở `MS1_Benchmark_CPU.ipynb` trên Colab, chọn CPU, chạy setup thành công rồi chọn phạm vi. Source cố định tại commit đã đo/kiểm chứng `4ea44c42810f3bb1564080c19d1ed889f3498ee0`. Không tự đổi sang `main` hay bỏ qua test lỗi.
 
 - **Cơ chế Smart Fast Resume**: Khi bật `AUTO_RESUME=True` và `RESUME_START_ID='AUTO'`, notebook tự động quét số bài đã hoàn tất (trong `validation` và `raw`), lùi lại 5 bài đệm để tiếp tục tải ngay lập tức, tránh việc quét lại hàng ngàn bài cũ trên Google Drive.
 - **Tăng tốc Gom lô (Batch Pre-fetch)**: Bật `FAST_BATCH_PREFETCH=True` để tự động chạy gom lô Metadata arXiv (`discovery_batch`) và gom lô trích dẫn Semantic Scholar (`s2.batch`) trong 50–100 IDs/request. Bước này giúp hoàn thành trước toàn bộ metadata và trích dẫn chỉ trong 4 phút, giảm hơn 6.5 giờ chờ mạng.
