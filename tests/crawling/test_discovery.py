@@ -130,3 +130,35 @@ class HTTPTests(TestCase):
         for values in ({"delay": 0}, {"timeout": 0}, {"retries": -1}, {"delay": float("nan")}, {"timeout": float("inf")}):
             with self.assertRaises(ValueError):
                 APIConfig(**values)
+
+
+class BatchDiscoveryTests(TestCase):
+    def test_batch_feed_parsing_and_prediscover(self):
+        import tempfile
+        from arxiv_pipeline.crawling.discovery import parse_feed_entries
+        from arxiv_pipeline.crawling.discovery_batch import pre_discover_batch
+
+        feed_multi = b'''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+          <entry><id>http://arxiv.org/abs/2301.00001v1</id>
+          <title>Test 1</title><summary>Abs 1</summary>
+          <author><name>Alice</name></author><published>2023-01-01T00:00:00Z</published>
+          <updated>2023-01-01T00:00:00Z</updated></entry>
+          <entry><id>http://arxiv.org/abs/2301.00002v1</id>
+          <title>Test 2</title><summary>Abs 2</summary>
+          <author><name>Bob</name></author><published>2023-01-02T00:00:00Z</published>
+          <updated>2023-01-02T00:00:00Z</updated></entry>
+        </feed>'''
+        entries = parse_feed_entries(feed_multi)
+        self.assertEqual(len(entries), 2)
+        self.assertIn("2301.00001", entries)
+        self.assertIn("2301.00002", entries)
+
+        client = ArxivClient(opener=Mock(return_value=BytesIO(feed_multi)), sleep=lambda _: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            res = pre_discover_batch(["2301.00001", "2301.00002"], output, client=client, batch_size=50)
+            self.assertEqual(res["discovered"], 2)
+            # Re-running immediately sees everything already done
+            res2 = pre_discover_batch(["2301.00001", "2301.00002"], output, client=client, batch_size=50)
+            self.assertEqual(res2["discovered"], 0)
+            self.assertEqual(res2["already_done"], 2)

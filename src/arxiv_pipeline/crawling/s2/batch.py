@@ -63,9 +63,12 @@ def crawl(ids, output: Path, source: S2Source, on_result=None) -> dict:
 
 
 def main(argv=None):
+    from arxiv_pipeline.main import expand_range
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", help="text file, one arXiv ID per line (# comments allowed)")
     ap.add_argument("--ids", nargs="*", default=[])
+    ap.add_argument("--range", dest="id_ranges", action="append", type=expand_range, default=[],
+                    metavar="START:END", help="Inclusive range within one month; may repeat")
     ap.add_argument("--output", required=True)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -73,6 +76,8 @@ def main(argv=None):
     raw = list(args.ids)
     if args.input:
         raw += [l.split("#")[0].strip() for l in Path(args.input).read_text(encoding="utf-8").splitlines()]
+    for values in args.id_ranges:
+        raw.extend(values)
     ids = []
     for text in filter(None, raw):
         try:

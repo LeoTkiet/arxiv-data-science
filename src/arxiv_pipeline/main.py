@@ -41,6 +41,7 @@ def main(argv=None, *, client=None):
     restart = parser.add_mutually_exclusive_group()
     restart.add_argument("--resume", action="store_true", help="Reuse complete checkpoints; retry failed records")
     restart.add_argument("--force", action="store_true", help="Refresh discovery and rerun all adapters")
+    parser.add_argument("--batch-discovery", action="store_true", help="Batch arXiv API queries in chunks of 50")
     parser.add_argument("--timeout", type=float, default=30)
     parser.add_argument("--retries", type=int, default=3, help="Extra attempts after initial request")
     parser.add_argument("--request-delay", type=float, default=3, help="Seconds, minimum 3")
@@ -75,7 +76,7 @@ def main(argv=None, *, client=None):
 
         summary = run(identifiers, args.output, client=client or ArxivClient(config),
                       resume=args.resume, full=args.stage == "crawl", observer=observe if timing_stream else None,
-                      run_id=args.run_id)
+                      run_id=args.run_id, batch_discovery=args.batch_discovery)
     except (OSError, KeyboardInterrupt) as exc:
         logger.error("Run interrupted; checkpoints can be resumed: %s", exc)
         return 130 if isinstance(exc, KeyboardInterrupt) else 1
