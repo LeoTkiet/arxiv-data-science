@@ -32,6 +32,8 @@ def _complete_discovery(record, identifier):
     try:
         from arxiv_pipeline.common.utils import normalize_id
         base, requested = normalize_id(identifier)
+        if record.get("status") in {"not_found", "invalid_id"}:
+            return True
         versions = record["versions"]
         count = record["metadata"]["latest_version"]
         return (record["schema_version"] == SCHEMA_VERSION and record["status"] == "success"
@@ -47,9 +49,12 @@ def _complete_discovery(record, identifier):
 
 def _artifacts_exist(result, output):
     try:
+        out_res = output.resolve()
         for relative in result["artifacts"].values():
+            if Path(relative).is_absolute() or ".." in Path(relative).parts:
+                return False
             path = (output / relative).resolve()
-            if Path(relative).is_absolute() or not path.is_relative_to(output.resolve()) or not path.exists():
+            if not path.is_relative_to(out_res) or not path.exists():
                 return False
         return True
     except (TypeError, AttributeError, ValueError):
@@ -61,12 +66,42 @@ def _run_stage(stage, record, output, version, upstream, resume, observer=None):
     number = version["version"] if version else None
     path = output / "state/stages" / stage / paper_key(record["arxiv_id"]) / f"{number or 'paper'}.json"
     cached = _read(path) if resume else None
+
+    # If stage == 'validate' and cached checkpoint is missing, backfill from validation report if it exists
+    if resume and cached is None and stage == "validate":
+        vpath = output / f"validation/{paper_key(record['arxiv_id'])}.json"
+        if vpath.is_file():
+            val_doc = _read(vpath)
+            if isinstance(val_doc, dict) and val_doc.get("schema_version") == SCHEMA_VERSION:
+                status = "success" if val_doc.get("valid") else "data_error"
+                cached = {
+                    "schema_version": SCHEMA_VERSION,
+                    "stage": "validate",
+                    "paper_id": record["arxiv_id"],
+                    "version": None,
+                    "status": status,
+                    "timestamp": val_doc.get("timestamp", utc_now()),
+                    "artifacts": {"validation": f"validation/{paper_key(record['arxiv_id'])}.json"},
+                    "attempts": 1,
+                    "size_bytes": vpath.stat().st_size,
+                    "error": None if val_doc.get("valid") else {"code": "validation_failed", "message": "cached from validation report"}
+                }
+                atomic_json(path, cached)
+
+    terminal_statuses = {"success", "no_source", "not_indexed", "no_data"}
+    if stage == "validate":
+        terminal_statuses.add("data_error")
+    if stage == "extract":
+        terminal_statuses.add("skipped")
+
+    upstream_ok = (upstream is None or upstream["status"] == "success"
+                   or (stage == "extract" and upstream.get("status") == "no_source"))
     # Empty outcomes are terminal; failures and unimplemented modules are retried.
-    if ((upstream is None or upstream["status"] == "success")
+    if (upstream_ok
             and isinstance(cached, dict) and cached.get("schema_version") == SCHEMA_VERSION
             and cached.get("stage") == stage and cached.get("paper_id") == record["arxiv_id"]
             and cached.get("version") == number
-            and cached.get("status") in {"success", "no_source", "not_indexed", "no_data"}
+            and cached.get("status") in terminal_statuses
             and _artifacts_exist(cached, output)):
         if cached["status"] != "success" or cached.get("artifacts"):
             if observer:
@@ -103,11 +138,15 @@ def _run_stage(stage, record, output, version, upstream, resume, observer=None):
     return serialized
 
 
-def run(identifiers, output: Path, *, client=None, resume=False, full=False, observer=None, run_id=None):
+def run(identifiers, output: Path, *, client=None, resume=False, full=False, observer=None, run_id=None,
+        batch_discovery=False):
     run_id = run_id or str(uuid4())
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     client = client or ArxivClient()
+    if batch_discovery:
+        from arxiv_pipeline.crawling.discovery_batch import pre_discover_batch
+        pre_discover_batch(identifiers, output, client=client)
     records, stages = [], []
     for identifier in dict.fromkeys(identifiers):
         paper_started = perf_counter()

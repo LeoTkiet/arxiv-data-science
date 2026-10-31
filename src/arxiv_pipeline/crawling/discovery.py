@@ -74,6 +74,33 @@ class ArxivClient:
             self.sleep(pause)
         raise AssertionError("Unreachable")
 
+    def fetch_batch(self, identifiers: list[str]) -> bytes:
+        id_list = ",".join(identifiers)
+        query = urlencode({"id_list": id_list, "max_results": len(identifiers)})
+        request = Request(f"{self.config.endpoint}?{query}", headers={"User-Agent": self.config.user_agent})
+        for retry in range(self.config.retries + 1):
+            if self.last_request is not None:
+                self.sleep(max(0, self.config.delay - (self.clock() - self.last_request)))
+            self.last_request = self.clock()
+            self.attempts += 1
+            try:
+                with self.opener(request, timeout=self.config.timeout) as response:
+                    return response.read()
+            except HTTPError as exc:
+                retryable = exc.code in {408, 429} or 500 <= exc.code <= 599
+                error = APIError(f"HTTP {exc.code}: {exc.reason}", retryable=retryable, http_status=exc.code)
+                wait = _retry_after(exc.headers.get("Retry-After")) if exc.headers else 0
+                exc.close()
+            except (URLError, TimeoutError, socket.timeout, ConnectionError, OSError, HTTPException) as exc:
+                error = APIError(str(exc), retryable=True)
+                wait = 0
+            if not error.retryable or retry == self.config.retries:
+                raise error
+            pause = max(wait, self.config.delay * 2**retry)
+            LOG.warning("Retry %s for batch in %.1fs: %s", retry + 1, pause, error)
+            self.sleep(pause)
+        raise AssertionError("Unreachable")
+
 
 def parse_entry(payload: bytes, expected_base: str, expected_version: int | None = None):
     try:
@@ -115,6 +142,45 @@ def parse_entry(payload: bytes, expected_base: str, expected_version: int | None
             "abstract": " ".join(entry.findtext(ATOM + "summary", "").split()),
             "categories": [c.get("term") for c in entry.findall(ATOM + "category") if c.get("term")],
             "doi": entry.findtext(ARXIV + "doi")}
+
+
+def parse_feed_entries(payload: bytes) -> dict[str, dict]:
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise DataError(f"Malformed Atom XML: {exc}") from exc
+    if root.tag != ATOM + "feed":
+        raise DataError("Response is not an Atom feed")
+    results = {}
+    for entry in root.findall(ATOM + "entry"):
+        identifier = entry.findtext(ATOM + "id", "")
+        if "/api/errors" in identifier:
+            continue
+        try:
+            base, version = normalize_id(identifier)
+        except ValueError:
+            continue
+        title = " ".join(entry.findtext(ATOM + "title", "").split())
+        authors = [" ".join(a.findtext(ATOM + "name", "").split()) for a in entry.findall(ATOM + "author")]
+        published, updated = entry.findtext(ATOM + "published"), entry.findtext(ATOM + "updated")
+        if not title or not authors or not all(authors) or not published or not updated:
+            continue
+        try:
+            for date in (published, updated):
+                parsed = datetime.fromisoformat(date.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    raise ValueError("Timestamp has no timezone")
+        except ValueError:
+            continue
+        results[base] = {
+            "arxiv_id": base, "version": version, "title": title, "authors": authors,
+            "submission_date": published, "updated_date": updated,
+            "venue": entry.findtext(ARXIV + "journal_ref"),
+            "abstract": " ".join(entry.findtext(ATOM + "summary", "").split()),
+            "categories": [c.get("term") for c in entry.findall(ATOM + "category") if c.get("term")],
+            "doi": entry.findtext(ARXIV + "doi"),
+        }
+    return results
 
 
 def discover(input_id: str, client: ArxivClient | None = None) -> DiscoveryRecord:

@@ -174,3 +174,16 @@ class ValidationTests(TestCase):
     def test_extra_version_directory_is_rejected(self):
         (self.output / 'corpus/2301.00001/v3').mkdir()
         self.assertEqual(self.validate()[0].status, 'data_error')
+
+    def test_resume_caches_validation_data_error(self):
+        from arxiv_pipeline.pipeline.crawl import _run_stage
+        (self.output / 'corpus/2301.00001/v3').mkdir()
+        events = []
+        res1 = _run_stage('validate', self.record, self.output, None, None, True, observer=lambda e: events.append(e))
+        self.assertEqual(res1['status'], 'data_error')
+        self.assertFalse(events[-1]['cached'])
+
+        # Second resume run must hit cache even though status is data_error
+        res2 = _run_stage('validate', self.record, self.output, None, None, True, observer=lambda e: events.append(e))
+        self.assertEqual(res2['status'], 'data_error')
+        self.assertTrue(events[-1]['cached'])
