@@ -1,5 +1,9 @@
 # Hợp đồng input/output v1
 
+Hợp đồng parsing Milestone 2 nằm tại [MS2_CONTRACTS.md](MS2_CONTRACTS.md).
+MS1 vẫn dùng `schema_version="1.0"`; không đổi checkpoint hay adapter crawling.
+MS2 dùng phiên bản riêng `PARSING_SCHEMA_VERSION="2.0"` và output root riêng.
+
 Đây là baseline triển khai của TV1 để các thành viên review và tích hợp. Chưa có xác nhận thực tế của TV2–TV5. Thay đổi phá vỡ hợp đồng cần tăng `schema_version` và cập nhật consumer, tests, tài liệu trong cùng PR. Cấu trúc trong yêu cầu của người dùng là cấu trúc chính; các tên `src/milestone1` trong kế hoạch được ánh xạ sang `src/arxiv_pipeline/crawling`.
 
 ## Discovery → TV2 và TV4
