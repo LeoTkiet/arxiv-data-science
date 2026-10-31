@@ -73,11 +73,18 @@ class CLITests(TestCase):
 
     def test_pending_modules_make_full_pipeline_incomplete(self):
         client, _ = fixture_client()
-        with patch("arxiv_pipeline.crawling.downloader.run", side_effect=NotImplementedError("pending")):
+        from arxiv_pipeline.crawling.s2.s2_source import Outcome
+        from arxiv_pipeline.crawling.s2.store import store_outcome
+
+        def references(record, output, **kwargs):
+            return store_outcome(Outcome(record['arxiv_id'], 'ok_empty'), output)
+
+        with patch("arxiv_pipeline.crawling.downloader.run", side_effect=NotImplementedError("pending")), \
+                patch("arxiv_pipeline.crawling.references.run", side_effect=references):
             self.assertEqual(self.call(["--ids", "2301.00001", "--stage", "crawl"], client), 1)
         stages = json.loads((self.output / "manifests/stages.json").read_text())
         self.assertEqual([s["status"] for s in stages],
-                         ["not_implemented", "skipped"] * 2 + ["success", "success", "not_implemented"])
+                         ["not_implemented", "skipped"] * 2 + ["success", "no_data", "data_error"])
 
     def test_invalid_config(self):
         client, _ = fixture_client()
