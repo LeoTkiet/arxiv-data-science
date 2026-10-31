@@ -188,17 +188,23 @@ def test_adapter_run_interface(tmp_path: Path):
     gathered_path.parent.mkdir(parents=True, exist_ok=True)
     gathered_path.write_text(
         json.dumps({
+            "schema_version": "2.0",
             "arxiv_id": "2301.00001",
             "version": 1,
             "is_empty_source": False,
             "merged_body_tex": r"\section{Intro} Hello world.",
+            "input_snapshot_id": "synthetic-snapshot",
         }),
         encoding="utf-8"
     )
 
     upstream = {
-        "status": "success",
-        "artifacts": {"gathered": gathered_rel}
+        "context": {"input_root": str(tmp_path.parent / "ms1"), "input_snapshot_id": "synthetic-snapshot"},
+        "stages": {"resolve": {
+            "stage": "resolve", "paper_id": "2301.00001", "version": 1,
+            "schema_version": "2.0", "status": "success",
+            "artifacts": {"gathered": gathered_rel},
+        }},
     }
 
     stage_result = run(record, tmp_path, version=version, upstream=upstream)
@@ -228,9 +234,18 @@ def test_adapter_run_no_source(tmp_path: Path):
     record = {"arxiv_id": "2301.00002"}
     version = {"version": 1}
 
+    (tmp_path / "gathered.json").write_text(json.dumps({
+        "schema_version": "2.0", "arxiv_id": "2301.00002", "version": 1,
+        "is_empty_source": True, "main_tex_path": None, "merged_body_tex": "",
+        "input_snapshot_id": "synthetic-snapshot",
+    }), encoding="utf-8")
     upstream = {
-        "status": "no_source",
-        "artifacts": {}
+        "context": {"input_root": str(tmp_path.parent / "ms1"), "input_snapshot_id": "synthetic-snapshot"},
+        "stages": {"resolve": {
+            "stage": "resolve", "paper_id": "2301.00002", "version": 1,
+            "schema_version": "2.0", "status": "no_source",
+            "artifacts": {"gathered": "gathered.json"},
+        }},
     }
 
     stage_result = run(record, tmp_path, version=version, upstream=upstream)

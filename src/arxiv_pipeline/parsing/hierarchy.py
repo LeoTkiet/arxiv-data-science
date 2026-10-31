@@ -11,11 +11,9 @@ Complies with docs/CONTRACTS.md, docs/MS2_CONTRACTS.md, and the Milestone 2 spec
 - Wraps raw_tree.json inside official envelope with schema_version 2.0
 """
 
-from dataclasses import asdict
 import json
 import logging
-import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 from typing import Any
 
@@ -50,6 +48,39 @@ BLOCK_MATH_ENVIRONMENTS = {
 }
 
 EXCLUDED_HEADING_KEYWORDS = {"references", "bibliography", "works cited", "tài liệu tham khảo"}
+LITERAL_ENVIRONMENTS = {"verbatim", "verbatim*", "lstlisting", "minted"}
+
+
+def _next_heading(text, pos, heading_re):
+    """Find a structural heading without entering literal, math or leaf blocks."""
+    command_re = re.compile(r"\\[A-Za-z]+|\\.|\$\$?", re.DOTALL)
+    atomic_envs = FIGURE_ENVIRONMENTS | BLOCK_MATH_ENVIRONMENTS | LITERAL_ENVIRONMENTS
+    while match := command_re.search(text, pos):
+        token = match.group()
+        heading = heading_re.match(text, match.start())
+        if heading:
+            return heading
+        pos = match.end()
+        if token == r"\begin":
+            env_match = re.match(r"\s*\{([^}]+)\}", text[pos:])
+            if env_match and env_match.group(1) in atomic_envs:
+                # find_matching_end_env expects the original exact begin tag.
+                tag_start = text.find('{', pos)
+                end = find_matching_end_env(text, tag_start - len(r'\begin'), env_match.group(1))
+                pos = max(pos, end)
+        elif token == r"\verb":
+            if pos < len(text) and text[pos] == '*':
+                pos += 1
+            if pos < len(text):
+                close = text.find(text[pos], pos + 1)
+                pos = len(text) if close == -1 else close + 1
+        elif token in {'$', '$$', r'\[', r'\('}:
+            closing = {r'\[': r'\]', r'\(': r'\)'}.get(token, token)
+            close = text.find(closing, pos)
+            while close > 0 and text[close - 1] == '\\':
+                close = text.find(closing, close + len(closing))
+            pos = len(text) if close == -1 else close + len(closing)
+    return None
 
 
 def extract_braced_argument(text: str, start_pos: int) -> tuple[str, int]:
@@ -82,6 +113,10 @@ def find_matching_end_env(text: str, start_pos: int, env_name: str) -> int:
     end_tag = f"\\end{{{env_name}}}"
     depth = 1
     pos = start_pos + len(begin_tag)
+    if env_name in LITERAL_ENVIRONMENTS:
+        # Begin commands inside code are literal text, not nested environments.
+        close = text.find(end_tag, pos)
+        return len(text) if close == -1 else close + len(end_tag)
     while pos <= len(text) and depth > 0:
         next_begin = text.find(begin_tag, pos)
         next_end = text.find(end_tag, pos)
@@ -184,7 +219,7 @@ class HierarchyBuilder:
         text_len = len(merged_body_tex)
 
         while pos < text_len:
-            match = heading_re.search(merged_body_tex, pos)
+            match = _next_heading(merged_body_tex, pos, heading_re)
             if not match:
                 # Không còn tiêu đề nào -> xử lý toàn bộ đoạn văn bản còn lại dưới nút cha hiện tại
                 remaining_text = merged_body_tex[pos:].strip()
@@ -245,13 +280,22 @@ class HierarchyBuilder:
             return
 
         # Các khối đặc biệt: \begin{...}, $$ or \[ (không tính \\[...])
-        start_re = re.compile(r"\\begin\{([a-zA-Z*]+)\}|\$\$|(?<!\\)\\\[")
+        start_re = re.compile(r"\\verb\*?|\\begin\{([a-zA-Z*]+)\}|\$\$|(?<!\\)\\\[")
 
         pos = 0
         text_len = len(text)
 
         while pos < text_len:
             match = start_re.search(text, pos)
+            # Inline verb content can mention block commands. Keep it inside the
+            # surrounding prose rather than finding a false figure/math boundary.
+            while match and match.group(0).startswith(r"\verb"):
+                delimiter_pos = match.end()
+                if delimiter_pos >= text_len:
+                    match = None
+                    break
+                close = text.find(text[delimiter_pos], delimiter_pos + 1)
+                match = None if close == -1 else start_re.search(text, close + 1)
             if not match:
                 remaining_prose = text[pos:].strip()
                 if remaining_prose:
@@ -373,102 +417,92 @@ def build_hierarchy_tree(version: int, merged_body_tex: str) -> list[ParsedNode]
     return builder.build(merged_body_tex)
 
 
-def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream: dict | None = None) -> StageResult:
-    """Adapter entrypoint adhering to docs/CONTRACTS.md and docs/MS2_CONTRACTS.md for stage 'hierarchy'."""
-    output_dir = Path(output_dir)
-    arxiv_id = record["arxiv_id"]
-    if not version:
-        raise ValueError("Hierarchy stage requires a version record")
+def _artifact_path(output: Path, relative: str) -> Path:
+    if (not isinstance(relative, str) or not relative or "\\" in relative
+            or Path(relative).is_absolute() or PureWindowsPath(relative).drive
+            or PureWindowsPath(relative).root or '..' in Path(relative).parts):
+        raise ValueError("Artifact path must be relative to the MS2 output root")
+    path = (output / relative).resolve()
+    if not path.is_relative_to(output):
+        raise ValueError("Artifact path escapes the MS2 output root")
+    return path
 
-    v_num = version["version"]
-    key = paper_key(arxiv_id)
 
-    dest_dir = output_dir / "parsed" / key / f"v{v_num}"
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    tree_artifact_rel = f"parsed/{key}/v{v_num}/raw_tree.json"
-    tree_path = output_dir / tree_artifact_rel
+def run(record: dict, output_dir: Path, *, version: dict | None = None,
+        upstream: dict | None = None) -> StageResult:
+    """Consume the canonical MS2 stages.resolve envelope; never guess an artifact path."""
+    paper_id = record.get('arxiv_id', '') if isinstance(record, dict) else ''
+    number = version.get('version') if isinstance(version, dict) else None
 
-    # Kiểm tra nếu upstream là PDF-only hoặc no_source
-    if upstream and upstream.get("status") == "no_source":
-        empty_payload = {
-            "schema_version": PARSING_SCHEMA_VERSION,
-            "arxiv_id": arxiv_id,
-            "version": v_num,
-            "nodes": [],
-            "warnings": [{"code": "no_tex_source", "message": "No TeX source available."}],
-        }
-        atomic_json(tree_path, empty_payload)
-        return StageResult(
-            stage="hierarchy",
-            paper_id=arxiv_id,
-            version=v_num,
-            status="no_source",
-            timestamp=utc_now(),
-            artifacts={"raw_tree": tree_artifact_rel},
-            attempts=1,
-            size_bytes=tree_path.stat().st_size if tree_path.exists() else 0,
-            schema_version=PARSING_SCHEMA_VERSION,
-        )
+    def result(status, artifacts=None, error=None, size=0):
+        return StageResult('hierarchy', paper_id, number, status, utc_now(),
+                           artifacts or {}, error, attempts=1, size_bytes=size,
+                           schema_version=PARSING_SCHEMA_VERSION)
 
-    # Đọc dữ liệu từ Trạm 1 (gathered.json)
-    gathered_data = None
-    gathered_rel = upstream.get("artifacts", {}).get("gathered") if upstream else None
-    if gathered_rel and (output_dir / gathered_rel).exists():
-        gathered_path = output_dir / gathered_rel
-    else:
-        gathered_path = dest_dir / "gathered.json"
-
-    if gathered_path.exists():
-        try:
-            gathered_data = json.loads(gathered_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            gathered_data = None
-
-    if gathered_data and gathered_data.get("is_empty_source"):
-        empty_payload = {
-            "schema_version": PARSING_SCHEMA_VERSION,
-            "arxiv_id": arxiv_id,
-            "version": v_num,
-            "nodes": [],
-            "warnings": [{"code": "no_tex_source", "message": "No TeX source available."}],
-        }
-        atomic_json(tree_path, empty_payload)
-        return StageResult(
-            stage="hierarchy",
-            paper_id=arxiv_id,
-            version=v_num,
-            status="no_source",
-            timestamp=utc_now(),
-            artifacts={"raw_tree": tree_artifact_rel},
-            attempts=1,
-            size_bytes=tree_path.stat().st_size if tree_path.exists() else 0,
-            schema_version=PARSING_SCHEMA_VERSION,
-        )
-
-    merged_body_tex = gathered_data.get("merged_body_tex", "") if gathered_data else ""
-
-    # Dựng cây phân cấp
-    nodes = build_hierarchy_tree(v_num, merged_body_tex)
-    serialized_nodes = [node.to_dict() for node in nodes]
-    tree_payload = {
-        "schema_version": PARSING_SCHEMA_VERSION,
-        "arxiv_id": arxiv_id,
-        "version": v_num,
-        "nodes": serialized_nodes,
-        "warnings": [],
-    }
-    atomic_json(tree_path, tree_payload)
-
-    file_size = tree_path.stat().st_size if tree_path.exists() else 0
-
-    return StageResult(
-        stage="hierarchy",
-        paper_id=arxiv_id,
-        version=v_num,
-        status="success",
-        timestamp=utc_now(),
-        artifacts={"raw_tree": tree_artifact_rel},
-        attempts=1,
-        size_bytes=file_size,
-        schema_version=PARSING_SCHEMA_VERSION,
-    )
+    try:
+        key = paper_key(paper_id)
+        if type(number) is not int or number < 1:
+            raise ValueError('Hierarchy requires a positive integer version')
+        output = Path(output_dir).resolve()
+        if not isinstance(upstream, dict) or not isinstance(upstream.get('context'), dict):
+            raise ValueError('Hierarchy requires the MS2 context/stages envelope')
+        context = upstream['context']
+        if not isinstance(context.get('input_root'), str) or not context['input_root']:
+            raise ValueError('Missing MS1 input root in runtime context')
+        snapshot = context.get('input_snapshot_id')
+        if not isinstance(snapshot, str) or not snapshot:
+            raise ValueError('Missing input snapshot identifier')
+        stages = upstream.get('stages')
+        if not isinstance(stages, dict):
+            raise ValueError('Missing stages envelope')
+        resolved = stages.get('resolve')
+        if resolved is None:
+            return result('skipped', error=ErrorInfo('upstream_unavailable', 'resolve checkpoint is missing'))
+        if not isinstance(resolved, dict) or (
+                resolved.get('stage'), resolved.get('paper_id'), resolved.get('version'),
+                resolved.get('schema_version')) != ('resolve', paper_id, number, PARSING_SCHEMA_VERSION):
+            raise ValueError('Resolver stage identity/schema does not match requested paper/version')
+        if type(resolved.get('version')) is not int:
+            raise ValueError('Resolver version must be an integer')
+        status = resolved.get('status')
+        if status not in {'success', 'no_source'}:
+            return result('skipped', error=ErrorInfo('upstream_unavailable', f'resolve status: {status}'))
+        artifacts = resolved.get('artifacts')
+        if not isinstance(artifacts, dict) or 'gathered' not in artifacts:
+            raise ValueError('Resolver result has no gathered artifact')
+        for relative in artifacts.values():
+            _artifact_path(output, relative)
+        gathered_path = _artifact_path(output, artifacts['gathered'])
+        if not gathered_path.is_file():
+            raise ValueError('Resolver gathered artifact does not exist')
+        gathered = json.loads(gathered_path.read_text(encoding='utf-8'))
+        if not isinstance(gathered, dict) or (
+                gathered.get('schema_version'), gathered.get('arxiv_id'), gathered.get('version')) != (
+                    PARSING_SCHEMA_VERSION, paper_id, number):
+            raise ValueError('Gathered artifact identity/schema mismatch')
+        if type(gathered.get('version')) is not int or gathered.get('input_snapshot_id') != snapshot:
+            raise ValueError('Gathered version/snapshot mismatch')
+        empty, body = gathered.get('is_empty_source'), gathered.get('merged_body_tex')
+        if type(empty) is not bool or not isinstance(body, str):
+            raise ValueError('Gathered requires a boolean is_empty_source and string merged_body_tex')
+        if empty != (status == 'no_source') or (empty and (body.strip() or gathered.get('main_tex_path') is not None)):
+            raise ValueError('Resolver status contradicts gathered empty/body fields')
+        warnings = gathered.get('warnings', [])
+        if not isinstance(warnings, list) or not all(isinstance(w, dict) for w in warnings):
+            raise ValueError('Gathered warnings must be a list of objects')
+        warnings = list(warnings)
+        if empty and not any(w.get('code') == 'no_tex_source' for w in warnings):
+            warnings.append(dict(code='no_tex_source', message='No TeX source available.', source_path=None))
+        nodes = [] if empty else build_hierarchy_tree(number, body)
+        if not empty and not nodes:
+            warnings.append(dict(code='empty_body', message='TeX source has no body content.', source_path=None))
+        payload = dict(schema_version=PARSING_SCHEMA_VERSION, arxiv_id=paper_id,
+                       version=number, nodes=[node.to_dict() for node in nodes], warnings=warnings)
+        relative = f'parsed/{key}/v{number}/raw_tree.json'
+        tree_path = _artifact_path(output, relative)
+        atomic_json(tree_path, payload)
+        return result(status, {'raw_tree': relative}, size=tree_path.stat().st_size)
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
+        return result('data_error', error=ErrorInfo('invalid_hierarchy_input', str(exc)))
+    except OSError as exc:
+        return result('error', error=ErrorInfo('io_error', str(exc)))
