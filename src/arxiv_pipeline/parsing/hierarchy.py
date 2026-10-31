@@ -1,15 +1,17 @@
 """Hierarchy Construction module for Milestone 2 (TV2).
 
-Complies with docs/CONTRACTS.md and the Milestone 2 specifications:
+Complies with docs/CONTRACTS.md, docs/MS2_CONTRACTS.md, and the Milestone 2 specifications:
 - Builds hierarchical tree: Document -> Headings -> Paragraphs/Itemize -> Leaves
 - Handles dynamic heading ranks: part < chapter < section < subsection < subsubsection < paragraph
 - Includes unnumbered Acknowledgements and Appendices (\\section*)
 - Excludes References / Bibliography sections completely
 - Branches itemize/enumerate into item child nodes with nested support
 - Extracts leaf blocks: figure (including table), block_formula ($$, \\[, equation, align), prose_block
+- Adheres to ParsedNode dataclass (temp_id, parent_temp_id, position, kind, raw_content, level, heading_rank)
+- Wraps raw_tree.json inside official envelope with schema_version 2.0
 """
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 import json
 import logging
 import os
@@ -17,25 +19,10 @@ from pathlib import Path
 import re
 from typing import Any
 
-from arxiv_pipeline.common.schemas import StageResult, ErrorInfo
+from arxiv_pipeline.common.schemas import PARSING_SCHEMA_VERSION, ParsedNode, StageResult, ErrorInfo
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
 
 LOG = logging.getLogger("arxiv_pipeline")
-
-
-# Tự định nghĩa ParsedNode nội bộ (sẽ chuyển sang schemas.py khi TV1 cập nhật)
-@dataclass
-class ParsedNode:
-    """Represents a node in the hierarchical syntax tree of a paper version."""
-    temp_node_id: str
-    parent_temp_id: str | None
-    kind: str  # "document" | "heading" | "itemize" | "item" | "figure" | "block_formula" | "prose_block"
-    level: int
-    raw_content: str
-    cleaned_content: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 # Trọng số thứ bậc của các lệnh tiêu đề LaTeX
@@ -140,10 +127,36 @@ class HierarchyBuilder:
         self.version = version
         self.node_counter = 0
         self.nodes: list[ParsedNode] = []
+        self.child_counters: dict[str | None, int] = {}
 
     def _next_id(self) -> str:
         self.node_counter += 1
         return f"v{self.version}_n{self.node_counter}"
+
+    def _add_node(
+        self,
+        parent_temp_id: str | None,
+        kind: str,
+        raw_content: str,
+        *,
+        node_id: str | None = None,
+        level: int | None = None,
+        heading_rank: int | None = None,
+    ) -> ParsedNode:
+        nid = node_id or self._next_id()
+        pos = self.child_counters.get(parent_temp_id, 0)
+        self.child_counters[parent_temp_id] = pos + 1
+        node = ParsedNode(
+            temp_id=nid,
+            parent_temp_id=parent_temp_id,
+            position=pos,
+            kind=kind,
+            raw_content=raw_content,
+            level=level,
+            heading_rank=heading_rank,
+        )
+        self.nodes.append(node)
+        return node
 
     def build(self, merged_body_tex: str) -> list[ParsedNode]:
         if not merged_body_tex or not merged_body_tex.strip():
@@ -151,14 +164,13 @@ class HierarchyBuilder:
 
         # Nút gốc: document
         root_id = f"v{self.version}_root"
-        root_node = ParsedNode(
-            temp_node_id=root_id,
+        self._add_node(
             parent_temp_id=None,
             kind="document",
-            level=0,
             raw_content=f"Version {self.version} root",
+            node_id=root_id,
+            level=0,
         )
-        self.nodes.append(root_node)
 
         # Ngăn xếp phân cấp: list of (rank, node_id, is_excluded)
         stack: list[tuple[int, str, bool]] = [(0, root_id, False)]
@@ -208,17 +220,15 @@ class HierarchyBuilder:
             parent_rank, parent_id, parent_is_excluded = stack[-1]
 
             if not is_excluded_section and not parent_is_excluded:
-                new_node_id = self._next_id()
                 heading_raw = merged_body_tex[match_start:pos]
-                node = ParsedNode(
-                    temp_node_id=new_node_id,
+                node = self._add_node(
                     parent_temp_id=parent_id,
                     kind="heading",
-                    level=rank,
                     raw_content=heading_raw.strip(),
+                    level=rank,
+                    heading_rank=rank,
                 )
-                self.nodes.append(node)
-                stack.append((rank, new_node_id, False))
+                stack.append((rank, node.temp_id, False))
             else:
                 # Đánh dấu nhánh này bị loại trừ
                 stack.append((rank, parent_id, True))
@@ -261,21 +271,17 @@ class HierarchyBuilder:
                 pos = end_pos
 
                 if env_name in FIGURE_ENVIRONMENTS:
-                    self.nodes.append(ParsedNode(
-                        temp_node_id=self._next_id(),
+                    self._add_node(
                         parent_temp_id=parent_id,
                         kind="figure",
-                        level=-1,
                         raw_content=matched_str.strip(),
-                    ))
+                    )
                 elif env_name in BLOCK_MATH_ENVIRONMENTS:
-                    self.nodes.append(ParsedNode(
-                        temp_node_id=self._next_id(),
+                    self._add_node(
                         parent_temp_id=parent_id,
                         kind="block_formula",
-                        level=-1,
                         raw_content=matched_str.strip(),
-                    ))
+                    )
                 elif env_name in {"itemize", "enumerate", "description"}:
                     self._parse_list_environment(matched_str, match.group(1), parent_id)
                 elif env_name in {"center", "flushleft", "flushright", "minipage"}:
@@ -286,13 +292,11 @@ class HierarchyBuilder:
                     self._parse_body_content(text[inner_start:inner_end], parent_id)
                 elif env_name in {"lstlisting", "verbatim", "minted"}:
                     # Khối mã nguồn / verbatim nguyên khối: không cắt vụn theo dòng trống
-                    self.nodes.append(ParsedNode(
-                        temp_node_id=self._next_id(),
+                    self._add_node(
                         parent_temp_id=parent_id,
                         kind="prose_block",
-                        level=-1,
                         raw_content=matched_str.strip(),
-                    ))
+                    )
                 else:
                     self._emit_prose_blocks(matched_str, parent_id)
 
@@ -304,13 +308,11 @@ class HierarchyBuilder:
                 else:
                     matched_str = text[match_start:]
                     pos = text_len
-                self.nodes.append(ParsedNode(
-                    temp_node_id=self._next_id(),
+                self._add_node(
                     parent_temp_id=parent_id,
                     kind="block_formula",
-                    level=-1,
                     raw_content=matched_str.strip(),
-                ))
+                )
             elif token == r"\[":
                 end_idx = text.find(r"\]", match.end())
                 if end_idx != -1:
@@ -319,24 +321,20 @@ class HierarchyBuilder:
                 else:
                     matched_str = text[match_start:]
                     pos = text_len
-                self.nodes.append(ParsedNode(
-                    temp_node_id=self._next_id(),
+                self._add_node(
                     parent_temp_id=parent_id,
                     kind="block_formula",
-                    level=-1,
                     raw_content=matched_str.strip(),
-                ))
+                )
 
     def _parse_list_environment(self, list_env_text: str, env_tag: str, parent_id: str) -> None:
         """Parses an itemize/enumerate block into an itemize node and item children."""
-        itemize_id = self._next_id()
-        self.nodes.append(ParsedNode(
-            temp_node_id=itemize_id,
+        itemize_node = self._add_node(
             parent_temp_id=parent_id,
             kind="itemize",
-            level=-1,
             raw_content="",
-        ))
+        )
+        itemize_id = itemize_node.temp_id
 
         begin_str = f"\\begin{{{env_tag}}}"
         end_str = f"\\end{{{env_tag}}}"
@@ -348,16 +346,13 @@ class HierarchyBuilder:
         for item_text in items:
             if not item_text.strip():
                 continue
-            item_id = self._next_id()
-            self.nodes.append(ParsedNode(
-                temp_node_id=item_id,
+            item_node = self._add_node(
                 parent_temp_id=itemize_id,
                 kind="item",
-                level=-1,
                 raw_content="",
-            ))
+            )
             # Nội dung bên trong item (có thể chứa văn bản, công thức toán hoặc itemize con)
-            self._parse_body_content(item_text, item_id)
+            self._parse_body_content(item_text, item_node.temp_id)
 
     def _emit_prose_blocks(self, text: str, parent_id: str) -> None:
         """Splits prose text into paragraph blocks by empty lines or \\par."""
@@ -365,13 +360,11 @@ class HierarchyBuilder:
         for p in paragraphs:
             cleaned = p.strip()
             if cleaned:
-                self.nodes.append(ParsedNode(
-                    temp_node_id=self._next_id(),
+                self._add_node(
                     parent_temp_id=parent_id,
                     kind="prose_block",
-                    level=-1,
                     raw_content=cleaned,
-                ))
+                )
 
 
 def build_hierarchy_tree(version: int, merged_body_tex: str) -> list[ParsedNode]:
@@ -381,7 +374,7 @@ def build_hierarchy_tree(version: int, merged_body_tex: str) -> list[ParsedNode]
 
 
 def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream: dict | None = None) -> StageResult:
-    """Adapter entrypoint adhering to docs/CONTRACTS.md for stage 'hierarchy'."""
+    """Adapter entrypoint adhering to docs/CONTRACTS.md and docs/MS2_CONTRACTS.md for stage 'hierarchy'."""
     output_dir = Path(output_dir)
     arxiv_id = record["arxiv_id"]
     if not version:
@@ -397,7 +390,14 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream
 
     # Kiểm tra nếu upstream là PDF-only hoặc no_source
     if upstream and upstream.get("status") == "no_source":
-        atomic_json(tree_path, [])
+        empty_payload = {
+            "schema_version": PARSING_SCHEMA_VERSION,
+            "arxiv_id": arxiv_id,
+            "version": v_num,
+            "nodes": [],
+            "warnings": [{"code": "no_tex_source", "message": "No TeX source available."}],
+        }
+        atomic_json(tree_path, empty_payload)
         return StageResult(
             stage="hierarchy",
             paper_id=arxiv_id,
@@ -406,7 +406,8 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream
             timestamp=utc_now(),
             artifacts={"raw_tree": tree_artifact_rel},
             attempts=1,
-            size_bytes=0,
+            size_bytes=tree_path.stat().st_size if tree_path.exists() else 0,
+            schema_version=PARSING_SCHEMA_VERSION,
         )
 
     # Đọc dữ liệu từ Trạm 1 (gathered.json)
@@ -424,7 +425,14 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream
             gathered_data = None
 
     if gathered_data and gathered_data.get("is_empty_source"):
-        atomic_json(tree_path, [])
+        empty_payload = {
+            "schema_version": PARSING_SCHEMA_VERSION,
+            "arxiv_id": arxiv_id,
+            "version": v_num,
+            "nodes": [],
+            "warnings": [{"code": "no_tex_source", "message": "No TeX source available."}],
+        }
+        atomic_json(tree_path, empty_payload)
         return StageResult(
             stage="hierarchy",
             paper_id=arxiv_id,
@@ -433,7 +441,8 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream
             timestamp=utc_now(),
             artifacts={"raw_tree": tree_artifact_rel},
             attempts=1,
-            size_bytes=0,
+            size_bytes=tree_path.stat().st_size if tree_path.exists() else 0,
+            schema_version=PARSING_SCHEMA_VERSION,
         )
 
     merged_body_tex = gathered_data.get("merged_body_tex", "") if gathered_data else ""
@@ -441,7 +450,14 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream
     # Dựng cây phân cấp
     nodes = build_hierarchy_tree(v_num, merged_body_tex)
     serialized_nodes = [node.to_dict() for node in nodes]
-    atomic_json(tree_path, serialized_nodes)
+    tree_payload = {
+        "schema_version": PARSING_SCHEMA_VERSION,
+        "arxiv_id": arxiv_id,
+        "version": v_num,
+        "nodes": serialized_nodes,
+        "warnings": [],
+    }
+    atomic_json(tree_path, tree_payload)
 
     file_size = tree_path.stat().st_size if tree_path.exists() else 0
 
@@ -454,4 +470,5 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None, upstream
         artifacts={"raw_tree": tree_artifact_rel},
         attempts=1,
         size_bytes=file_size,
+        schema_version=PARSING_SCHEMA_VERSION,
     )

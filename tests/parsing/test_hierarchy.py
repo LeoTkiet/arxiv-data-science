@@ -1,6 +1,7 @@
 """Unit tests for TV2 Hierarchy Construction (tests/parsing/test_hierarchy.py).
 
 All tests run completely offline with synthetic LaTeX samples in < 0.2s.
+Complies with docs/MS2_CONTRACTS.md and ParsedNode schema.
 """
 
 import json
@@ -12,7 +13,7 @@ from arxiv_pipeline.parsing.hierarchy import (
     extract_braced_argument,
     run,
 )
-from arxiv_pipeline.common.schemas import StageResult
+from arxiv_pipeline.common.schemas import PARSING_SCHEMA_VERSION, StageResult
 
 
 def test_extract_braced_argument_nested():
@@ -38,18 +39,21 @@ def test_standard_hierarchy_tree():
     assert len(nodes) >= 5
     assert nodes[0].kind == "document"
     assert nodes[0].level == 0
+    assert nodes[0].position == 0
     assert nodes[0].parent_temp_id is None
 
     sec = next(n for n in nodes if n.kind == "heading" and "Introduction" in n.raw_content)
-    assert sec.parent_temp_id == nodes[0].temp_node_id
+    assert sec.parent_temp_id == nodes[0].temp_id
     assert sec.level == 3
+    assert sec.position == 0
 
     subsec = next(n for n in nodes if n.kind == "heading" and "Background" in n.raw_content)
-    assert subsec.parent_temp_id == sec.temp_node_id
+    assert subsec.parent_temp_id == sec.temp_id
     assert subsec.level == 4
 
     bg_prose = next(n for n in nodes if n.kind == "prose_block" and "Background text" in n.raw_content)
-    assert bg_prose.parent_temp_id == subsec.temp_node_id
+    assert bg_prose.parent_temp_id == subsec.temp_id
+    assert bg_prose.position == 0
 
 
 def test_dynamic_heading_jumping():
@@ -68,11 +72,12 @@ def test_dynamic_heading_jumping():
     subsub = next(n for n in nodes if "Jumped Deep Heading" in n.raw_content)
     sec2 = next(n for n in nodes if "Second Section" in n.raw_content)
 
-    assert subsub.parent_temp_id == sec1.temp_node_id
+    assert subsub.parent_temp_id == sec1.temp_id
     assert subsub.level == 5
 
-    assert sec2.parent_temp_id == nodes[0].temp_node_id
+    assert sec2.parent_temp_id == nodes[0].temp_id
     assert sec2.level == 3
+    assert sec2.position == 1  # Second section under root document
 
 
 def test_inclusions_and_exclusions():
@@ -119,7 +124,9 @@ def test_nested_itemize_environment():
 
     second_item = items[1]
     inner_itemize = itemizes[1]
-    assert inner_itemize.parent_temp_id == second_item.temp_node_id
+    assert inner_itemize.parent_temp_id == second_item.temp_id
+    assert items[0].position == 0
+    assert items[1].position == 1
 
 
 def test_figure_and_table_as_figure():
@@ -171,7 +178,7 @@ def test_block_formulas():
 
 
 def test_adapter_run_interface(tmp_path: Path):
-    """Verify run() adapter writes raw_tree.json and returns valid StageResult."""
+    """Verify run() adapter writes raw_tree.json envelope and returns valid StageResult."""
     record = {"arxiv_id": "2301.00001"}
     version = {"version": 1}
 
@@ -201,9 +208,38 @@ def test_adapter_run_interface(tmp_path: Path):
     assert stage_result.paper_id == "2301.00001"
     assert stage_result.version == 1
     assert stage_result.status == "success"
+    assert stage_result.schema_version == PARSING_SCHEMA_VERSION
     assert "raw_tree" in stage_result.artifacts
 
     tree_file = tmp_path / stage_result.artifacts["raw_tree"]
     assert tree_file.exists()
-    data = json.loads(tree_file.read_text(encoding="utf-8"))
-    assert len(data) >= 3  # root + heading + prose
+    payload = json.loads(tree_file.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "2.0"
+    assert payload["arxiv_id"] == "2301.00001"
+    assert payload["version"] == 1
+    assert isinstance(payload["nodes"], list)
+    assert len(payload["nodes"]) >= 3  # root + heading + prose
+    assert payload["nodes"][0]["position"] == 0
+    assert payload["nodes"][0]["temp_id"] == "v1_root"
+
+
+def test_adapter_run_no_source(tmp_path: Path):
+    """Verify run() adapter correctly handles no_source upstream."""
+    record = {"arxiv_id": "2301.00002"}
+    version = {"version": 1}
+
+    upstream = {
+        "status": "no_source",
+        "artifacts": {}
+    }
+
+    stage_result = run(record, tmp_path, version=version, upstream=upstream)
+
+    assert stage_result.status == "no_source"
+    assert stage_result.schema_version == PARSING_SCHEMA_VERSION
+    tree_file = tmp_path / stage_result.artifacts["raw_tree"]
+    assert tree_file.exists()
+    payload = json.loads(tree_file.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == "2.0"
+    assert payload["nodes"] == []
+    assert len(payload["warnings"]) > 0
