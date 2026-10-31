@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase
 
 from arxiv_pipeline.common.schemas import (
-    BibtexRow, ElementRow, HierarchyRow, PARSING_SCHEMA_VERSION, StageResult,
+    BibtexRow, ElementRow, HierarchyRow, PARSING_SCHEMA_VERSION, ParsedNode, StageResult,
 )
 from parsing.ms2_contract_examples import examples, write_corpus_fixture
 
@@ -85,3 +85,20 @@ class MS2ContractTests(TestCase):
             (output / 'example.json').write_text(json.dumps(examples()), encoding='utf-8')
             after = {str(p.relative_to(source)): p.read_bytes() for p in source.rglob('*') if p.is_file()}
             self.assertEqual(before, after)
+
+    def test_parsed_node_schema(self):
+        node = ParsedNode(
+            temp_id="r1",
+            parent_temp_id=None,
+            position=0,
+            kind="document",
+            raw_content="Version 1 root",
+            level=0,
+        )
+        d = node.to_dict()
+        self.assertEqual(d["temp_id"], "r1")
+        self.assertIsNone(d["parent_temp_id"])
+        self.assertEqual(d["position"], 0)
+        self.assertEqual(d["kind"], "document")
+        self.assertEqual(d["raw_content"], "Version 1 root")
+        self.assertEqual(d["level"], 0)

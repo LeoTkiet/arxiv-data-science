@@ -26,7 +26,7 @@ python -m pytest -q
 | Thành viên | Nội dung cần đối chiếu | Trạng thái |
 | --- | --- | --- |
 | TV1 | Bốn cột hierarchy theo đề, artifacts/điều kiện bàn giao; baseline nội bộ | Đã chuẩn bị; quyết định bốn cột được người dùng chốt |
-| TV2 | Envelope `stages.resolve`, node temp_id/parent/position, cây empty, raw_tree | Chờ xác nhận |
+| TV2 | Đã thống nhất dataclass `ParsedNode` trong schemas.py, envelope `raw_tree`, `temp_id`, `position`, cây empty | Đã xác nhận & đồng bộ |
 | TV3 | Envelope `stages.hierarchy`, cleaned_content, đánh lại position sau tách câu | Chờ xác nhận |
 | TV4 | Nhánh bibliography đọc resolve; gom versions; ba bảng, occurrences và manifest | Chờ xác nhận |
 | TV5 | Validation MS2 riêng, root không có cạnh null, empty coverage, counts trước/sau dedup | Chờ xác nhận |

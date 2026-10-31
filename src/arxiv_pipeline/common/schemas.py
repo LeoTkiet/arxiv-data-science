@@ -47,6 +47,33 @@ class BibtexRow:
 
 
 @dataclass
+class ParsedNode:
+    """Represents a node in the intermediate hierarchical syntax tree (raw_tree)."""
+
+    temp_id: str
+    parent_temp_id: str | None
+    position: int
+    kind: str
+    raw_content: str
+    level: int | None = None
+    heading_rank: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        res: dict[str, Any] = {
+            "temp_id": self.temp_id,
+            "parent_temp_id": self.parent_temp_id,
+            "position": self.position,
+            "kind": self.kind,
+            "raw_content": self.raw_content,
+        }
+        if self.level is not None:
+            res["level"] = self.level
+        if self.heading_rank is not None:
+            res["heading_rank"] = self.heading_rank
+        return res
+
+
+@dataclass
 class ErrorInfo:
     kind: str
     message: str
