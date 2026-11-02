@@ -152,12 +152,19 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.revalidate:
         from arxiv_pipeline.export.validation import run
+        from arxiv_pipeline.common.utils import paper_key
+        from concurrent.futures import ThreadPoolExecutor
         records = json.loads((args.output / 'manifests/discovery.json').read_text(encoding='utf-8'))
-        seen = set()
+        seen, todo = set(), []
         for rec in records:
             if rec['status'] == 'success' and rec['arxiv_id'] not in seen:
-                run(rec, args.output)
+                val_file = args.output / 'validation' / f"{paper_key(rec['arxiv_id'])}.json"
+                if not val_file.is_file():
+                    todo.append(rec)
                 seen.add(rec['arxiv_id'])
+        if todo:
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                list(pool.map(lambda r: run(r, args.output), todo))
     atomic_json(args.save, summarize(args.output))
     return 0
 
