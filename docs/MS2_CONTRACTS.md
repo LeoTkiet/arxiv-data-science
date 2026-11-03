@@ -7,7 +7,8 @@ triển khai do TV1 đề xuất, chờ TV2–TV5 xác nhận trước tích h�
 Nguồn ưu tiên: [đề MS2 chính thức](https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/parsing/).
 Ví dụ executable: `tests/parsing/ms2_contract_examples.py`; chạy
 `python -m pytest tests/parsing/test_ms2_contracts.py -q` từ repo root.
-File này đặc tả giao tiếp; chưa có Resolver/Orchestrator MS2 chạy thật.
+File này đặc tả giao tiếp. Resolver đã triển khai trong phần B với tests giả lập;
+xem [MS2_RESOLVER.md](MS2_RESOLVER.md). Orchestrator MS2 chưa triển khai.
 
 ## 1. Audit MS1 (A1)
 
@@ -25,7 +26,7 @@ File này đặc tả giao tiếp; chưa có Resolver/Orchestrator MS2 chạy th
   corpus; resolver chỉ đọc file source phù hợp, không coi sidecar là TeX.
 - Extractor có thể trả `no_source` khi source thiếu/rỗng; có thể trả `success`
   nếu chỉ còn `.bib`. Hai trường hợp này cần kiểm tra bổ sung ở điều kiện bàn giao.
-- Module parsing hiện là slot `NotImplementedError`. Validator
+- Tại thời điểm audit phần A, module parsing là slot `NotImplementedError`. Validator
   `export/validation.py` đang phục vụ MS1, không thay thế bằng validator MS2.
 - Khi audit, repo local ở `feature/tv5-ms1-benchmark-report`, base `f70c0b1`.
   Theo yêu cầu push sau đó, phần A được tách sang `feature/m2-tv1-contracts`

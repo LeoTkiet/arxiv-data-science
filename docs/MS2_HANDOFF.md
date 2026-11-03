@@ -3,6 +3,10 @@
 Ngày chuẩn bị: 29/10/2026. Đây là tài liệu để người dùng chuyển cho nhóm;
 chưa gửi thông điệp ra ngoài và chưa có xác nhận TV2–TV5.
 
+Cập nhật 31/10/2026: theo người dùng, A5 tiếp tục chờ nhóm hoàn tất dữ liệu MS1
+để đối chiếu/bàn giao thực tế. Ma trận bên dưới ghi nhận các xác nhận kỹ thuật
+đã có; không đánh đồng việc có schema/mock tests với nghiệm thu corpus.
+
 ## Tài liệu và mã bàn giao
 
 - `docs/MS2_CONTRACTS.md`: audit MS1, schema, adapter envelope, artifact,
@@ -45,7 +49,9 @@ Review độc lập đã kiểm tra schema/docs/examples. Đã sửa mâu thuẫ
 empty body không buộc bibtex rỗng; giữ references nếu còn đọc được `.bib`.
 Ví dụ cũng có cảnh báo khi không cung cấp source map và lý do version empty.
 
-- Chưa làm Resolver, Orchestrator, CLI hay validator MS2 (phần B/C).
+- Resolver phần B đã triển khai trên `feature/m2-tv1-resolver`, kiểm thử bằng
+  corpus/checkpoint giả lập; xem `MS2_RESOLVER.md`. Orchestrator, CLI và validator
+  MS2 chưa triển khai (phần C và nhiệm vụ TV5). Không sửa Hierarchy PR10.
 - Chưa đối chiếu dữ liệu thật của lần crawl đang chạy, chưa nghiệm thu MS1/MS2.
 - Dùng fixture tạm để phát triển ngay; khi có mẫu MS1 hoàn tất, cần nhận cả
   discovery, checkpoint download/extract và sidecar bằng chứng liên quan.
