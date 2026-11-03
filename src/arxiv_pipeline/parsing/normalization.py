@@ -161,45 +161,48 @@ def clean_latex_formatting(text: str) -> str:
     if not text:
         return ""
 
-    # Normalize inline math first
+    # 1. Normalize inline math first (\(...) -> $...$)
     text = normalize_inline_math(text)
 
-    # Remove placement options like \begin{figure}[htpb] -> \begin{figure}
-    text = _PLACEMENT_RE.sub(lambda m: m.group(0).split("[")[0], text)
-
-    # Remove layout commands
-    text = _LAYOUT_COMMANDS_RE.sub(" ", text)
-
-    # Remove spacing commands with arguments
-    text = _SPACING_ARGS_RE.sub(" ", text)
-
-    # Remove table rules
-    text = _TABLE_RULES_RE.sub(" ", text)
-
-    # Remove font size declarations
-    text = _FONT_SIZES_RE.sub(" ", text)
-
-    # Unwrap text styles (\textbf{text} -> text)
-    text = _strip_text_styles(text)
-
-    # Replace LaTeX quotation styles
-    text = re.sub(r"``|''", '"', text)
-    text = re.sub(r"`|'", "'", text)
-
-    # Replace non-breaking space (tie) with normal space
-    text = re.sub(r"(?<!\\)~", " ", text)
-
-    # Unescape escaped special characters (outside math)
-    # Mask inline math to protect special chars within equations
+    # 2. IMMEDIATELY mask all math expressions before ANY text-level replacements or cleanup!
     math_tokens: list[str] = []
 
     def _mask_math(m: re.Match) -> str:
         math_tokens.append(m.group(0))
         return f"__MATH_{len(math_tokens) - 1}__"
 
-    text = re.sub(r"(?<!\\)\$(?:\\\$|[^\$])+(?<!\\)\$", _mask_math, text)
+    # Mask display math if present ($$...$$ or \[...\])
+    text = re.sub(r"\$\$.*?\$\$", _mask_math, text, flags=re.DOTALL)
+    text = re.sub(r"\\\[.*?\\\]", _mask_math, text, flags=re.DOTALL)
+    # Mask inline math ($...$)
+    text = re.sub(r"(?<!\\)\$(?!\$).*?(?<!\\)\$", _mask_math, text, flags=re.DOTALL)
 
-    # Unescape common escaped symbols
+    # 3. Remove placement options like \begin{figure}[htpb] -> \begin{figure}
+    text = _PLACEMENT_RE.sub(lambda m: m.group(0).split("[")[0], text)
+
+    # 4. Remove layout commands
+    text = _LAYOUT_COMMANDS_RE.sub(" ", text)
+
+    # 5. Remove spacing commands with arguments
+    text = _SPACING_ARGS_RE.sub(" ", text)
+
+    # 6. Remove table rules
+    text = _TABLE_RULES_RE.sub(" ", text)
+
+    # 7. Remove font size declarations
+    text = _FONT_SIZES_RE.sub(" ", text)
+
+    # 8. Unwrap text styles (\textbf{text} -> text)
+    text = _strip_text_styles(text)
+
+    # 9. Replace LaTeX quotation styles outside math (safe: math is masked, f''(x) is protected)
+    text = re.sub(r"``|''", '"', text)
+    text = re.sub(r"`|'", "'", text)
+
+    # 10. Replace non-breaking space (tie) with normal space
+    text = re.sub(r"(?<!\\)~", " ", text)
+
+    # 11. Unescape common escaped symbols outside math
     text = text.replace(r"\%", "%")
     text = text.replace(r"\&", "&")
     text = text.replace(r"\_", "_")
@@ -207,11 +210,11 @@ def clean_latex_formatting(text: str) -> str:
     text = text.replace(r"\{", "{")
     text = text.replace(r"\}", "}")
 
-    # Restore math tokens
+    # 12. Restore math tokens
     for i, token in enumerate(math_tokens):
         text = text.replace(f"__MATH_{i}__", token)
 
-    # Collapse multiple whitespaces and newlines
+    # 13. Collapse multiple whitespaces and newlines
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -470,11 +473,26 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
             raise ValueError("Normalization requires an upstream envelope")
 
         # Resolve upstream hierarchy stage result
-        stages = upstream.get("stages") if isinstance(upstream.get("stages"), dict) else {}
-        hierarchy_res = stages.get("hierarchy") or upstream.get("hierarchy") or upstream
+        stages = upstream.get("stages")
+        if stages is not None:
+            if not isinstance(stages, dict):
+                raise ValueError("Missing stages envelope")
+            hierarchy_res = stages.get("hierarchy")
+        elif upstream.get("stage") == "hierarchy":
+            hierarchy_res = upstream
+        else:
+            hierarchy_res = upstream.get("hierarchy")
 
-        if not isinstance(hierarchy_res, dict) or hierarchy_res.get("stage") != "hierarchy":
+        if hierarchy_res is None:
             return result("skipped", error=ErrorInfo("upstream_unavailable", "hierarchy checkpoint is missing"))
+
+        if not isinstance(hierarchy_res, dict) or (
+                hierarchy_res.get("stage"), hierarchy_res.get("paper_id"), hierarchy_res.get("version"),
+                hierarchy_res.get("schema_version")) != ("hierarchy", paper_id, number, PARSING_SCHEMA_VERSION):
+            raise ValueError("Hierarchy stage identity/schema does not match requested paper/version")
+
+        if type(hierarchy_res.get("version")) is not int:
+            raise ValueError("Hierarchy version must be an integer")
 
         status = hierarchy_res.get("status")
         if status not in {"success", "no_source"}:
@@ -483,6 +501,9 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
         artifacts = hierarchy_res.get("artifacts")
         if not isinstance(artifacts, dict) or "raw_tree" not in artifacts:
             raise ValueError("Hierarchy result has no raw_tree artifact")
+
+        for relative in artifacts.values():
+            _safe_artifact_path(output, relative)
 
         raw_tree_path = _safe_artifact_path(output, artifacts["raw_tree"])
         if not raw_tree_path.is_file():
@@ -496,13 +517,29 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
                 raw_tree_payload.get("version")) != (PARSING_SCHEMA_VERSION, paper_id, number):
             raise ValueError("raw_tree header identity mismatch")
 
-        warnings = list(raw_tree_payload.get("warnings", []))
+        if type(raw_tree_payload.get("version")) is not int:
+            raise ValueError("raw_tree version must be an integer")
 
-        # Handle empty/no_source version
+        if "nodes" not in raw_tree_payload or not isinstance(raw_tree_payload.get("nodes"), list):
+            raise ValueError("raw_tree payload missing required 'nodes' list")
+
+        raw_nodes = raw_tree_payload["nodes"]
+
+        warnings = raw_tree_payload.get("warnings", [])
+        if not isinstance(warnings, list) or not all(isinstance(w, dict) for w in warnings):
+            raise ValueError("raw_tree warnings must be a list of objects")
+        warnings = list(warnings)
+
+        # Handle empty/no_source version vs success
         if status == "no_source":
+            if raw_nodes:
+                raise ValueError("Hierarchy status contradicts raw_tree: status is 'no_source' but raw_tree contains nodes")
+            if not any(w.get("code") == "no_tex_source" for w in warnings):
+                warnings.append(dict(code="no_tex_source", message="No TeX source available.", source_path=None))
             normalized_nodes: list[dict[str, Any]] = []
         else:
-            raw_nodes = raw_tree_payload.get("nodes", [])
+            if not raw_nodes and not any(w.get("code") == "empty_body" for w in warnings):
+                warnings.append(dict(code="empty_body", message="TeX source has no body content.", source_path=None))
             normalized_nodes = transform_tree_to_normalized(raw_nodes)
 
         relative = f"parsed/{key}/v{number}/normalized_tree.json"

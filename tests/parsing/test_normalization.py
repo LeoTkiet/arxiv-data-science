@@ -11,6 +11,7 @@ Complies with docs/MS2_CONTRACTS.md and verifies:
 
 import json
 from pathlib import Path
+from typing import Any
 import pytest
 
 from arxiv_pipeline.common.schemas import PARSING_SCHEMA_VERSION, StageResult
@@ -380,6 +381,130 @@ def test_run_adapter_header_mismatch(tmp_path: Path):
                 "paper_id": paper_id,
                 "version": 1,
                 "status": "success",
+                "schema_version": PARSING_SCHEMA_VERSION,
+                "artifacts": {"raw_tree": raw_tree_rel},
+            }
+        }
+    }
+
+    result = run({"arxiv_id": paper_id}, output_dir, version={"version": 1}, upstream=upstream)
+    assert result.status == "data_error"
+    assert result.error.kind == "invalid_normalization_input"
+
+def test_clean_latex_formatting_preserves_derivatives_and_primes():
+    text = r"Given $f''(x) > 0$ and $g'(x) = f'''(t)$, we see that ``quoted text'' is preserved."
+    cleaned = clean_latex_formatting(text)
+    assert r"$f''(x) > 0$" in cleaned
+    assert r"$g'(x) = f'''(t)$" in cleaned
+    assert '"quoted text"' in cleaned
+    assert "f\"(x)" not in cleaned
+
+
+@pytest.mark.parametrize("field,value", [
+    ("stage", "resolve"),
+    ("paper_id", "2310.99999"),
+    ("version", 2),
+    ("schema_version", "1.0"),
+])
+def test_mismatched_hierarchy_checkpoint_identity_rejected(tmp_path: Path, field: str, value: Any):
+    output_dir = tmp_path / "out"
+    paper_id = "2310.12345"
+    key = "2310.12345"
+
+    raw_tree_rel = f"parsed/{key}/v1/raw_tree.json"
+    raw_tree_file = output_dir / raw_tree_rel
+    raw_tree_file.parent.mkdir(parents=True, exist_ok=True)
+
+    raw_tree_payload = {
+        "schema_version": PARSING_SCHEMA_VERSION,
+        "arxiv_id": paper_id,
+        "version": 1,
+        "nodes": [
+            {"temp_id": "r1", "parent_temp_id": None, "position": 0, "kind": "document", "raw_content": "Root"},
+        ],
+        "warnings": [],
+    }
+    raw_tree_file.write_text(json.dumps(raw_tree_payload), encoding="utf-8")
+
+    hierarchy_dict = {
+        "stage": "hierarchy",
+        "paper_id": paper_id,
+        "version": 1,
+        "status": "success",
+        "schema_version": PARSING_SCHEMA_VERSION,
+        "artifacts": {"raw_tree": raw_tree_rel},
+    }
+    hierarchy_dict[field] = value
+
+    upstream = {"stages": {"hierarchy": hierarchy_dict}}
+
+    result = run({"arxiv_id": paper_id}, output_dir, version={"version": 1}, upstream=upstream)
+    assert result.status == "data_error"
+    assert result.error.kind == "invalid_normalization_input"
+
+def test_run_adapter_missing_nodes_list_fails(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    paper_id = "2310.12345"
+    key = "2310.12345"
+
+    raw_tree_rel = f"parsed/{key}/v1/raw_tree.json"
+    raw_tree_file = output_dir / raw_tree_rel
+    raw_tree_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Missing "nodes" key
+    raw_tree_payload = {
+        "schema_version": PARSING_SCHEMA_VERSION,
+        "arxiv_id": paper_id,
+        "version": 1,
+        "warnings": [],
+    }
+    raw_tree_file.write_text(json.dumps(raw_tree_payload), encoding="utf-8")
+
+    upstream = {
+        "stages": {
+            "hierarchy": {
+                "stage": "hierarchy",
+                "paper_id": paper_id,
+                "version": 1,
+                "status": "success",
+                "schema_version": PARSING_SCHEMA_VERSION,
+                "artifacts": {"raw_tree": raw_tree_rel},
+            }
+        }
+    }
+
+    result = run({"arxiv_id": paper_id}, output_dir, version={"version": 1}, upstream=upstream)
+    assert result.status == "data_error"
+    assert result.error.kind == "invalid_normalization_input"
+
+def test_run_adapter_no_source_with_nodes_contradiction_fails(tmp_path: Path):
+    output_dir = tmp_path / "out"
+    paper_id = "2310.12345"
+    key = "2310.12345"
+
+    raw_tree_rel = f"parsed/{key}/v1/raw_tree.json"
+    raw_tree_file = output_dir / raw_tree_rel
+    raw_tree_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # raw_tree has nodes, but hierarchy status is no_source!
+    raw_tree_payload = {
+        "schema_version": PARSING_SCHEMA_VERSION,
+        "arxiv_id": paper_id,
+        "version": 1,
+        "nodes": [
+            {"temp_id": "r1", "parent_temp_id": None, "position": 0, "kind": "document", "raw_content": "Root"},
+        ],
+        "warnings": [],
+    }
+    raw_tree_file.write_text(json.dumps(raw_tree_payload), encoding="utf-8")
+
+    upstream = {
+        "stages": {
+            "hierarchy": {
+                "stage": "hierarchy",
+                "paper_id": paper_id,
+                "version": 1,
+                "status": "no_source",
                 "schema_version": PARSING_SCHEMA_VERSION,
                 "artifacts": {"raw_tree": raw_tree_rel},
             }
