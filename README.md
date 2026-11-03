@@ -149,3 +149,55 @@ for record in records:
 Sau một lần chạy bị gián đoạn, có thể đọc record từ `state/discovery/*.json` thay manifest. Gọi trực tiếp chỉ cập nhật báo cáo validation, không cập nhật checkpoint validate hay summary của orchestrator. Chạy kiểm tra sau khi tiến trình ghi corpus đã dừng. Benchmark tài nguyên và báo cáo Jupyter Book là các phần riêng, chưa nằm trong validator.
 
 Quy trình nhóm: tạo issue có người phụ trách, input/output và tiêu chí nghiệm thu; làm trên nhánh `feature/...` theo kế hoạch nhóm, PR có hướng dẫn test và ít nhất một reviewer, không commit trực tiếp main. Việc merge nhánh thành viên, tạo repository báo cáo và benchmark Colab thực hiện khi có module/quyền truy cập tương ứng.
+
+## Milestone 2 — điều phối parsing offline
+
+Parsing đọc một snapshot MS1 đã ghi xong, không gọi lại arXiv/Semantic Scholar.
+Input MS1 và output MS2 phải là hai thư mục tách rời; không chạy nhiều CLI ghi
+cùng output root và không dùng corpus đang có tiến trình khác cập nhật.
+
+```powershell
+python main.py --stage parse --ms1-input artifacts/ms1-snapshot --output artifacts/ms2 --ids 2310.12345 --resume
+```
+
+Bỏ `--ids` để chọn mọi record trong snapshot. Có thể dùng `--input ids.txt` hoặc
+`--range` để lọc paper như MS1; ID chọn parsing không có hậu tố version.
+`--versions 1 2` giới hạn các version được xử lý. Nếu chưa chọn đủ mọi version
+MS1 của một paper, pipeline ghi incomplete và không công bố bảng cấp paper.
+`--force` chạy lại các stage trong phạm vi đã chọn; không xóa kết quả paper khác
+hoặc ghi vào MS1. `--resume` và `--force` không dùng đồng thời.
+
+Luồng theo version: Resolver → Hierarchy → Normalization, cùng nhánh Resolver →
+Bibliography. Sau khi đủ các version: Deduplication → Validation MS2. Bibliography
+vẫn nhận version không có TeX để xử lý `.bib` nếu còn; version empty không bị
+loại khỏi mẫu số coverage. Discovery `not_found`/`invalid_id` được ghi riêng ở
+`excluded_inputs`, không tạo publication giả.
+
+Resolver/Hierarchy đã có implementation. Normalization, Bibliography,
+Deduplication hoặc Validation MS2 chưa bàn giao sẽ trả `not_implemented` và làm
+lượt chạy incomplete; framework không giả lập output thành công trong CLI thật.
+Unit tests dùng adapters giả lập để kiểm tra luồng và các trường hợp lỗi offline.
+
+Đầu ra điều phối chính:
+
+- `parsing_summary.json`: complete, paper_results, stage_statuses, input_errors.
+- `manifests/parsing.json`, `manifests/stages.json`: kết quả của lượt chọn hiện tại.
+- `state/stages/<stage>/<paper_key>/<N|paper>.json`: StageResult schema 2.0.
+- File `.dependencies.json` đi kèm: fingerprint đầu vào/mã module/checkpoint và
+  hash artifact để kiểm tra resume; artifact thiếu, hỏng hoặc thay đổi phải chạy lại.
+- `state/parsing/<paper_key>.json`: tình trạng đầy đủ của từng paper. Bảng cuối
+  chỉ được xem là hoàn tất khi trạng thái pipeline này có complete=true.
+
+Version mới hoặc nội dung đầu vào thay đổi làm mất hiệu lực export/validation
+cấp paper. Nếu snapshot đổi giữa quá trình xử lý, pipeline không công bố complete.
+Export cũ bị đánh complete=false khi upstream hiện tại chưa đủ; dữ liệu không bị
+xóa. Validator MS1 ở `export/validation.py` giữ nguyên; adapter TV5 MS2 được nối
+qua `reporting/milestone2/validation.py`, stage `validate_parse`.
+
+Exit code parsing: `0` khi mọi publication đã chọn hoàn tất hoặc là empty hợp
+lệ, `1` khi lỗi/chưa bàn giao/chưa đủ version, `2` khi tham số CLI sai, `130` khi
+bị ngắt. Chi tiết envelope và artifact xem [hợp đồng MS2](docs/MS2_CONTRACTS.md).
+
+```powershell
+python -m pytest tests/pipeline/test_parse.py tests/pipeline/test_cli.py -q
+```

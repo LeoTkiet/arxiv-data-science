@@ -50,8 +50,10 @@ empty body không buộc bibtex rỗng; giữ references nếu còn đọc đư�
 Ví dụ cũng có cảnh báo khi không cung cấp source map và lý do version empty.
 
 - Resolver phần B đã triển khai trên `feature/m2-tv1-resolver`, kiểm thử bằng
-  corpus/checkpoint giả lập; xem `MS2_RESOLVER.md`. Orchestrator, CLI và validator
-  MS2 chưa triển khai (phần C và nhiệm vụ TV5). Không sửa Hierarchy PR10.
+  corpus/checkpoint giả lập; xem `MS2_RESOLVER.md`. Phần C đã có Orchestrator/CLI
+  offline trên `feature/m2-tv1-orchestrator`, ghép Resolver và Hierarchy đã sửa.
+  Normalization/Bibliography/Deduplication/validator MS2 còn chờ bàn giao; CLI thật
+  báo incomplete thay vì sinh output giả. Adapter TV5 dùng module/stage riêng.
 - Chưa đối chiếu dữ liệu thật của lần crawl đang chạy, chưa nghiệm thu MS1/MS2.
 - Dùng fixture tạm để phát triển ngay; khi có mẫu MS1 hoàn tất, cần nhận cả
   discovery, checkpoint download/extract và sidecar bằng chứng liên quan.
@@ -60,3 +62,11 @@ Ví dụ cũng có cảnh báo khi không cung cấp source map và lý do versi
 - Nhánh bàn giao phần A: `feature/m2-tv1-contracts`, tách từ `origin/main`
   (`c90e79c`) theo yêu cầu người dùng commit/push; không ghép vào PR MS1.
 - Checklist theo dõi nằm tại `docs/checklists/MS2_TV1_CHECKLIST.md`.
+
+Cập nhật kiểm thử phần C ngày 02/11/2026: 29 tests Orchestrator mới, gồm graph,
+resume/force, thêm version, hash artifact, snapshot đổi khi export, input readonly
+và Windows junction. Toàn repo **260 passed, 1 skipped, 61 subtests passed**;
+test skip là trường hợp tạo symlink của Resolver trên host Windows. Hướng dẫn
+chạy và hợp đồng được cập nhật ngay trong README/MS2_CONTRACTS, không thêm
+file kế hoạch cá nhân cho phần C. Tích hợp validator thật của TV5 (C8) và nghiệm
+thu trên corpus thật vẫn chưa hoàn tất.

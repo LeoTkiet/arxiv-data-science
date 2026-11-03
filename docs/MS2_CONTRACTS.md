@@ -8,7 +8,9 @@ Nguồn ưu tiên: [đề MS2 chính thức](https://hcmus-cs-ta.github.io/lab-b
 Ví dụ executable: `tests/parsing/ms2_contract_examples.py`; chạy
 `python -m pytest tests/parsing/test_ms2_contracts.py -q` từ repo root.
 File này đặc tả giao tiếp. Resolver đã triển khai trong phần B với tests giả lập;
-xem [MS2_RESOLVER.md](MS2_RESOLVER.md). Orchestrator MS2 chưa triển khai.
+xem [MS2_RESOLVER.md](MS2_RESOLVER.md). Orchestrator phần C được triển khai trong
+`pipeline/parse.py`; hướng dẫn CLI tại README. Downstream chưa bàn giao vẫn được
+báo not_implemented, không thay bằng kết quả giả trong production.
 
 ## 1. Audit MS1 (A1)
 
@@ -256,3 +258,49 @@ hiệu lực dedup/validation paper. C triển khai chi tiết, không sửa res
 
 Các JSON ví dụ trong Python là mẫu hợp đồng; không phải số liệu thật hay module
 đã nghiệm thu. TV2–TV5 cần xác nhận phần phụ trách trong `MS2_HANDOFF.md`.
+
+## 8. Orchestrator phần C
+
+API cấp pipeline (khác adapter từng stage) là:
+
+```python
+from arxiv_pipeline.pipeline.parse import run
+summary = run(ids, output_dir, input_root=ms1_snapshot,
+              resume=True, selected_versions=None)
+```
+
+`ids=None` hoặc `[]` chọn toàn snapshot; danh sách ID chỉ lọc paper, version chọn
+qua selected_versions. API có `force`, `observer`, `run_id`; `adapters` là seam
+kiểm thử để truyền mapping stage → callable theo chữ ký adapter đã chốt. CLI thật
+không tự sinh mock adapter. Schema/ý nghĩa StageResult MS1 giữ nguyên 1.0.
+
+Discovery đọc checkpoint `state/discovery/*.json`; chỉ khi không có checkpoint
+mới đọc `manifests/discovery.json`. Alias cùng publication được gom nếu đồng ý
+về status/danh sách version; record mâu thuẫn, thiếu version hoặc malformed không
+được coi là đủ dữ liệu. Missing checkpoint download/extract giữ trạng thái bị chặn.
+
+Fingerprint mỗi version gồm VersionRecord, checkpoint download/extract và hash
+nội dung source/corpus/sidecar. Context cho version stage dùng fingerprint này,
+để thêm vN không buộc parse lại v1 không đổi. Context dedup/validation dùng hash
+record discovery cùng toàn bộ fingerprints version, bao gồm danh sách version
+kỳ vọng. Kiểm tra lại input trước/sau export/validation; snapshot đổi thì không
+đánh complete. Đường dẫn input_root runtime không ghi vào dependency sidecar.
+
+Resume chỉ tái sử dụng success/no_source đúng stage/paper/version/schema, có
+fingerprint của upstream/mã adapter/mã orchestrator khớp, checkpoint không đổi
+và SHA-256 mọi artifact khớp. Skipped, lỗi và not_implemented luôn được thử lại.
+Đầu vào thất bại chặn cache success cũ. Output/log/state junction thoát root bị
+từ chối trước khi logger hoặc adapter ghi dữ liệu.
+
+Trước dedup phải có Normalization/Bibliography terminal của mọi version. Export
+phải có ba bảng dạng arrays và parsing_manifest đúng schema/paper/snapshot,
+expected_versions và complete=true. Manifest cũ được invalidated nếu phiên chạy
+hiện tại thiếu dữ liệu; khi discovery hỏng ở chế độ toàn snapshot, export không
+còn xác minh được cũng bị đánh complete=false. Các bảng/manifest của paper
+ngoài phạm vi chọn tường minh không bị thay đổi.
+
+Adapter TV5 `validate_parse` chưa có implementation trong phần C. Nó phải trả
+StageResult schema 2.0, artifact `validation` là JSON object có schema_version,
+arxiv_id và valid=true khi status success/no_source. Module dự kiến vẫn là
+`reporting/milestone2/validation.py`; không thay validator MS1. Kết quả cấp paper
+chỉ complete khi export và validator MS2 cùng terminal, dù bảng export đã đủ.
