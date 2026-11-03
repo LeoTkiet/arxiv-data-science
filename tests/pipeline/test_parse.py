@@ -336,9 +336,15 @@ class ParseTests(TestCase):
         self.assertEqual(len(self.calls), 10)
 
     def test_no_production_modules_are_fabricated_as_success(self):
-        summary = parse.run([self.paper], self.output, input_root=self.source)
+        # Make one production import unavailable deliberately, independently of
+        # which team modules have already been delivered on this branch.
+        adapters = {s: adapter for s, adapter in self.adapters.items() if s != 'normalize'}
+        with patch.dict(parse.MODULES, {'normalize': 'arxiv_pipeline.__missing_test_normalization__'}):
+            summary = parse.run([self.paper], self.output, input_root=self.source, adapters=adapters)
         self.assertFalse(summary['complete'])
-        self.assertGreater(summary['stage_statuses']['not_implemented'], 0)
+        self.assertEqual(summary['stage_statuses']['not_implemented'], 2)
+        self.assertNotIn(('deduplicate', None), self.counted())
+        self.assertNotIn(('validate_parse', None), self.counted())
 
     def test_rejects_bool_export_manifest_complete(self):
         original = self.adapters['deduplicate']
@@ -388,3 +394,50 @@ class ParseTests(TestCase):
             main(['--stage', 'parse', '--ms1-input', str(self.source), '--output', str(self.output)])
         self.assertEqual(raised.exception.code, 2)
         self.assertFalse((self.source / 'pipeline.log').exists())
+
+
+    def test_real_tv4_bibtex_export_is_hashed_and_resumed_as_text(self):
+        from arxiv_pipeline.parsing import bibliography, deduplication, hierarchy, resolver
+        self.adapters.update(resolve=resolver.run, hierarchy=hierarchy.run,
+                             bibliography=bibliography.run, deduplicate=deduplication.run)
+        for version in self.record['versions']:
+            path = self.source / version['corpus_path'] / 'main.tex'
+            path.write_text(
+                r'\documentclass{article}\begin{document}Hello \cite{x}.'
+                r'\begin{thebibliography}{9}\bibitem{x} Author. Title. 2020.'
+                r'\end{thebibliography}\end{document}', encoding='utf-8')
+        events = []
+        self.assertTrue(self.run_pipeline(observer=events.append)['complete'])
+        bib = self.output / 'tables/2310.12345/references.bib'
+        self.assertIn('@', bib.read_text(encoding='utf-8'))
+        dependencies = json.loads((self.output / 'state/stages/deduplicate/2310.12345/paper.dependencies.json')
+                                  .read_text(encoding='utf-8'))
+        self.assertEqual(dependencies['artifacts']['tables/2310.12345/references.bib'],
+                         hashlib.sha256(bib.read_bytes()).hexdigest())
+        events.clear()
+        self.assertTrue(self.run_pipeline(resume=True, observer=events.append)['complete'])
+        self.assertTrue(next(e for e in events if e['stage'] == 'deduplicate')['cached'])
+        bib.write_text('% modified export', encoding='utf-8')
+        events.clear()
+        self.assertTrue(self.run_pipeline(resume=True, observer=events.append)['complete'])
+        self.assertFalse(next(e for e in events if e['stage'] == 'deduplicate')['cached'])
+        self.assertIn('@', bib.read_text(encoding='utf-8'))
+
+    def test_real_tv4_empty_bibtex_export_is_valid(self):
+        from arxiv_pipeline.parsing import deduplication
+        self.adapters['deduplicate'] = deduplication.run
+        self.assertTrue(self.run_pipeline()['complete'])
+        self.assertEqual((self.output / 'tables/2310.12345/references.bib').read_text(encoding='utf-8'), '')
+        self.assertTrue(self.run_pipeline(resume=True)['complete'])
+
+    def test_json_artifacts_still_require_valid_json(self):
+        original = self.adapters['deduplicate']
+        def malformed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            (self.output / result.artifacts['elements']).write_text('{broken', encoding='utf-8')
+            return result
+        self.adapters['deduplicate'] = malformed
+        summary = self.run_pipeline()
+        self.assertFalse(summary['complete'])
+        self.assertEqual(summary['stage_statuses']['error'], 1)
+        self.assertNotIn(('validate_parse', None), self.counted())

@@ -229,11 +229,16 @@ class _Runner:
         if not isinstance(result.get('artifacts'), dict):
             raise ValueError('Adapter artifacts must be a mapping')
         inventory = {}
-        for relative in result['artifacts'].values():
+        for name, relative in result['artifacts'].items():
             target = _path(self.output, relative)
             if not target.is_file():
                 raise ValueError('MS2 artifact must be a file inside the output root')
-            _read(target)  # Written output must be JSON, not a half-written file.
+            if result.get('stage') == 'deduplicate' and name == 'bibtex_file':
+                # TV4 also exports references.bib as UTF-8 text (possibly empty).
+                # Its producer owns BibTeX semantics; resume still hashes its bytes.
+                target.read_text(encoding='utf-8')
+            else:
+                _read(target)  # All other contract artifacts must be valid JSON.
             inventory[relative] = _file_hash(target)
         return inventory
 
