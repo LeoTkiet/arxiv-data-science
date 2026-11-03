@@ -536,3 +536,53 @@ def test_run_adapter_no_source_with_nodes_contradiction_fails(tmp_path: Path):
     assert result.status == "data_error"
     assert result.error.kind == "invalid_normalization_input"
 
+
+
+
+def test_clean_latex_formatting_nested_math_in_inline_dollar():
+    """Verify math environment inside $...$ restores correctly without leaking __MATH_ placeholders."""
+    raw = r"$\begin{pmatrix}a&b\\c&d\end{pmatrix}$"
+    cleaned = clean_latex_formatting(raw)
+    assert "__MATH_" not in cleaned
+    assert r"\begin{pmatrix}a&b\\c&d\end{pmatrix}" in cleaned
+    assert cleaned.startswith("$") and cleaned.endswith("$")
+
+
+def test_split_into_sentences_nested_math_in_inline_dollar():
+    """Verify sentence splitter does not leak __PROTECTED_ or split inside nested math matrix."""
+    prose = (
+        r"Consider the transition matrix $\begin{pmatrix}a&b\\c&d\end{pmatrix}$ for the model. "
+        r"This represents the state change across steps."
+    )
+    sentences = split_into_sentences(prose)
+    assert len(sentences) == 2
+    assert "__PROTECTED_" not in sentences[0]
+    assert "__MATH_" not in sentences[0]
+    assert r"$\begin{pmatrix}a&b\\c&d\end{pmatrix}$" in sentences[0]
+    assert sentences[1] == "This represents the state change across steps."
+
+
+def test_transform_tree_figure_caption_nested_math_restores_cleanly():
+    """Verify figure with caption containing matrix inside inline math is clean in normalized tree."""
+    figure_content = (
+        r"\begin{figure}[htpb]"
+        r"\centering"
+        r"\includegraphics[width=0.8\textwidth]{plot.png}"
+        r"\caption{The covariance matrix is given by $\begin{pmatrix}\sigma_1^2 & \rho \\ \rho & \sigma_2^2\end{pmatrix}$ under assumptions.}"
+        r"\label{fig:cov}"
+        r"\end{figure}"
+    )
+    raw_nodes = [
+        {"temp_id": "r1", "parent_temp_id": None, "position": 0, "kind": "document", "raw_content": "Doc"},
+        {"temp_id": "f1", "parent_temp_id": "r1", "position": 0, "kind": "figure", "raw_content": figure_content},
+    ]
+
+    normalized = transform_tree_to_normalized(raw_nodes)
+    assert len(normalized) == 2
+    fig_node = normalized[1]
+    assert fig_node["kind"] == "figure"
+    assert "[htpb]" not in fig_node["cleaned_content"]
+    assert r"\centering" not in fig_node["cleaned_content"]
+    assert "__MATH_" not in fig_node["cleaned_content"]
+    assert "__PROTECTED_" not in fig_node["cleaned_content"]
+    assert r"\begin{pmatrix}\sigma_1^2 & \rho \\ \rho & \sigma_2^2\end{pmatrix}" in fig_node["cleaned_content"]

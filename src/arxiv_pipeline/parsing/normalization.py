@@ -223,9 +223,19 @@ def clean_latex_formatting(text: str) -> str:
     text = text.replace(r"\{", "{")
     text = text.replace(r"\}", "}")
 
-    # 12. Restore math tokens
-    for i, token in enumerate(math_tokens):
-        text = text.replace(f"__MATH_{i}__", token)
+    # 12. Restore math tokens in reverse order (handles nested tokens, e.g. matrix inside inline $)
+    for i in range(len(math_tokens) - 1, -1, -1):
+        text = text.replace(f"__MATH_{i}__", math_tokens[i])
+
+    while "__MATH_" in text:
+        changed = False
+        for i in range(len(math_tokens) - 1, -1, -1):
+            ph = f"__MATH_{i}__"
+            if ph in text:
+                text = text.replace(ph, math_tokens[i])
+                changed = True
+        if not changed:
+            break
 
     # 13. Collapse multiple whitespaces and newlines
     text = re.sub(r"\s+", " ", text).strip()
@@ -323,9 +333,19 @@ def split_into_sentences(text: str) -> list[str]:
     for s in raw_sentences:
         # Unmask abbreviation dots
         s = s.replace("<DOT>", ".")
-        # Unmask protected tokens
-        for i, token in enumerate(protected_tokens):
-            s = s.replace(f"__PROTECTED_{i}__", token)
+        # Unmask protected tokens in reverse order (handles nested tokens, e.g. matrix inside inline $)
+        for i in range(len(protected_tokens) - 1, -1, -1):
+            s = s.replace(f"__PROTECTED_{i}__", protected_tokens[i])
+
+        while "__PROTECTED_" in s:
+            changed = False
+            for i in range(len(protected_tokens) - 1, -1, -1):
+                ph = f"__PROTECTED_{i}__"
+                if ph in s:
+                    s = s.replace(ph, protected_tokens[i])
+                    changed = True
+            if not changed:
+                break
         s = s.strip()
         if s:
             results.append(s)
