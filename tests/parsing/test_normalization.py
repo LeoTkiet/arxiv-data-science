@@ -400,6 +400,27 @@ def test_clean_latex_formatting_preserves_derivatives_and_primes():
     assert "f\"(x)" not in cleaned
 
 
+def test_clean_latex_formatting_preserves_equation_inside_figure():
+    text = r"\begin{figure}\begin{equation}f''(x)=0\end{equation}\caption{``Figure caption'' with $y'' = 1$}\end{figure}"
+    cleaned = clean_latex_formatting(text)
+    assert r"f''(x)=0" in cleaned
+    assert "f\"(x)" not in cleaned
+    assert r"$y'' = 1$" in cleaned
+    assert '"Figure caption"' in cleaned
+
+
+def test_transform_tree_preserves_equation_in_figure():
+    raw_nodes = [
+        {"temp_id": "r1", "parent_temp_id": None, "position": 0, "kind": "document", "raw_content": "Root"},
+        {"temp_id": "fig1", "parent_temp_id": "r1", "position": 0, "kind": "figure",
+         "raw_content": r"\begin{figure}\begin{equation}f''(x)=0\end{equation}\end{figure}"},
+    ]
+    normalized = transform_tree_to_normalized(raw_nodes)
+    fig = next(n for n in normalized if n["kind"] == "figure")
+    assert r"f''(x)=0" in fig["cleaned_content"]
+    assert "f\"(x)" not in fig["cleaned_content"]
+
+
 @pytest.mark.parametrize("field,value", [
     ("stage", "resolve"),
     ("paper_id", "2310.99999"),

@@ -96,6 +96,17 @@ def normalize_block_math(raw_content: str) -> str:
 # 2. LaTeX Cleanup
 # -----------------------------------------------------------------------------
 
+# Math environments that can appear inside figures, tables, prose, or standalone
+_BLOCK_MATH_ENV_NAMES = (
+    r"equation\*?|align\*?|alignat\*?|xalignat\*?|xxalignat|gather\*?|multline\*?|"
+    r"eqnarray\*?|flalign\*?|displaymath|math|subequations\*?|split|cases|aligned|"
+    r"gathered|alignedat|matrix|pmatrix|bmatrix|vmatrix|Vmatrix"
+)
+_BLOCK_MATH_ENV_RE = re.compile(
+    r"\\begin\{(" + _BLOCK_MATH_ENV_NAMES + r")\}(.*?)\\end\{\1\}",
+    re.DOTALL
+)
+
 # Placement specifiers on tables/figures: [htpb], [!htb], [H], etc.
 _PLACEMENT_RE = re.compile(r"\\begin\{(?:figure|table)\*?\}\s*\[[a-zA-Z!]+\]", re.I)
 
@@ -171,6 +182,8 @@ def clean_latex_formatting(text: str) -> str:
         math_tokens.append(m.group(0))
         return f"__MATH_{len(math_tokens) - 1}__"
 
+    # Mask block math environments (\begin{equation}...\end{equation}, align, etc.)
+    text = _BLOCK_MATH_ENV_RE.sub(_mask_math, text)
     # Mask display math if present ($$...$$ or \[...\])
     text = re.sub(r"\$\$.*?\$\$", _mask_math, text, flags=re.DOTALL)
     text = re.sub(r"\\\[.*?\\\]", _mask_math, text, flags=re.DOTALL)
@@ -257,11 +270,14 @@ def split_into_sentences(text: str) -> list[str]:
         protected_tokens.append(content)
         return f"__PROTECTED_{idx}__"
 
-    # Step 1: Protect inline math expressions $...$
+    # Step 1: Protect all math expressions (environments, display math, inline math)
     def _mask_math(m: re.Match) -> str:
         return _protect(m.group(0))
 
-    masked_text = re.sub(r"(?<!\\)\$(?:\\\$|[^\$])+(?<!\\)\$", _mask_math, cleaned)
+    masked_text = _BLOCK_MATH_ENV_RE.sub(_mask_math, cleaned)
+    masked_text = re.sub(r"\$\$.*?\$\$", _mask_math, masked_text, flags=re.DOTALL)
+    masked_text = re.sub(r"\\\[.*?\\\]", _mask_math, masked_text, flags=re.DOTALL)
+    masked_text = re.sub(r"(?<!\\)\$(?:\\\$|[^\$])+(?<!\\)\$", _mask_math, masked_text)
 
     # Protect LaTeX commands with arguments (\cite{...}, \ref{...}, \url{...}, etc.)
     _PROTECT_COMMANDS = re.compile(
