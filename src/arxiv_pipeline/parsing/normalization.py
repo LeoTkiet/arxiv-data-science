@@ -167,6 +167,16 @@ def _strip_text_styles(text: str) -> str:
     return text
 
 
+def _token_prefix(text: str, label: str) -> str:
+    """Choose a marker absent from source, so literal placeholder names stay literal."""
+    used = set(text)
+    for codepoint in range(0xE000, 0xF900):
+        marker = chr(codepoint)
+        if marker not in used:
+            return f"{marker}__{label}_"
+    raise ValueError("No unused private-use marker available for token masking")
+
+
 def clean_latex_formatting(text: str) -> str:
     """Clean presentational LaTeX commands while strictly preserving citations and math."""
     if not text:
@@ -177,10 +187,11 @@ def clean_latex_formatting(text: str) -> str:
 
     # 2. IMMEDIATELY mask all math expressions before ANY text-level replacements or cleanup!
     math_tokens: list[str] = []
+    math_prefix = _token_prefix(text, "MATH")
 
     def _mask_math(m: re.Match) -> str:
         math_tokens.append(m.group(0))
-        return f"__MATH_{len(math_tokens) - 1}__"
+        return f"{math_prefix}{len(math_tokens) - 1}__"
 
     # Mask block math environments (\begin{equation}...\end{equation}, align, etc.)
     text = _BLOCK_MATH_ENV_RE.sub(_mask_math, text)
@@ -223,19 +234,10 @@ def clean_latex_formatting(text: str) -> str:
     text = text.replace(r"\{", "{")
     text = text.replace(r"\}", "}")
 
-    # 12. Restore math tokens in reverse order (handles nested tokens, e.g. matrix inside inline $)
+    # Each token can only contain earlier tokens; one reverse pass restores all
+    # nesting. The source-absent prefix prevents interpreting literal text as tokens.
     for i in range(len(math_tokens) - 1, -1, -1):
-        text = text.replace(f"__MATH_{i}__", math_tokens[i])
-
-    while "__MATH_" in text:
-        changed = False
-        for i in range(len(math_tokens) - 1, -1, -1):
-            ph = f"__MATH_{i}__"
-            if ph in text:
-                text = text.replace(ph, math_tokens[i])
-                changed = True
-        if not changed:
-            break
+        text = text.replace(f"{math_prefix}{i}__", math_tokens[i])
 
     # 13. Collapse multiple whitespaces and newlines
     text = re.sub(r"\s+", " ", text).strip()
@@ -274,11 +276,12 @@ def split_into_sentences(text: str) -> list[str]:
         return []
 
     protected_tokens: list[str] = []
+    protected_prefix = _token_prefix(cleaned, "PROTECTED")
 
     def _protect(content: str) -> str:
         idx = len(protected_tokens)
         protected_tokens.append(content)
-        return f"__PROTECTED_{idx}__"
+        return f"{protected_prefix}{idx}__"
 
     # Step 1: Protect all math expressions (environments, display math, inline math)
     def _mask_math(m: re.Match) -> str:
@@ -326,26 +329,17 @@ def split_into_sentences(text: str) -> list[str]:
 
     # Step 3: Split into sentences at genuine sentence-ending punctuation (. ! ?)
     # Sentence boundary: [.!?] followed by whitespace and a starting character
-    sentence_boundary = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[\$]|__PROTECTED_)")
+    sentence_boundary = re.compile(
+        r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[\$]|" + re.escape(protected_prefix) + r")")
     raw_sentences = sentence_boundary.split(masked_text)
 
     results: list[str] = []
     for s in raw_sentences:
         # Unmask abbreviation dots
         s = s.replace("<DOT>", ".")
-        # Unmask protected tokens in reverse order (handles nested tokens, e.g. matrix inside inline $)
+        # Restore nested tokens in a bounded reverse pass, preserving literal markers.
         for i in range(len(protected_tokens) - 1, -1, -1):
-            s = s.replace(f"__PROTECTED_{i}__", protected_tokens[i])
-
-        while "__PROTECTED_" in s:
-            changed = False
-            for i in range(len(protected_tokens) - 1, -1, -1):
-                ph = f"__PROTECTED_{i}__"
-                if ph in s:
-                    s = s.replace(ph, protected_tokens[i])
-                    changed = True
-            if not changed:
-                break
+            s = s.replace(f"{protected_prefix}{i}__", protected_tokens[i])
         s = s.strip()
         if s:
             results.append(s)

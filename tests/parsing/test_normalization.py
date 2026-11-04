@@ -586,3 +586,31 @@ def test_transform_tree_figure_caption_nested_math_restores_cleanly():
     assert "__MATH_" not in fig_node["cleaned_content"]
     assert "__PROTECTED_" not in fig_node["cleaned_content"]
     assert r"\begin{pmatrix}\sigma_1^2 & \rho \\ \rho & \sigma_2^2\end{pmatrix}" in fig_node["cleaned_content"]
+
+
+@pytest.mark.parametrize("function,placeholder", [
+    ("clean_latex_formatting", "__MATH_0__"),
+    ("split_into_sentences", "__PROTECTED_0__"),
+])
+def test_literal_placeholder_in_math_terminates_without_changing_content(function, placeholder):
+    # A subprocess timeout turns a restoration loop into a bounded test failure.
+    import subprocess
+    import sys
+    raw = r"$\text{\detokenize{" + placeholder + r"}}$"
+    program = (
+        "import sys,json; sys.path.insert(0," + repr(str(Path(__file__).resolve().parents[2] / "src")) + "); "
+        "from arxiv_pipeline.parsing.normalization import " + function + "; "
+        "print(json.dumps(" + function + "(" + repr(raw) + ")))"
+    )
+    completed = subprocess.run([sys.executable, "-X", "utf8", "-c", program],
+                               capture_output=True, text=True, timeout=5, check=True)
+    assert json.loads(completed.stdout) == (raw if function == "clean_latex_formatting" else [raw])
+
+
+@pytest.mark.parametrize("literal", ["__MATH_0__", "__MATH_1__", "__PROTECTED_0__", "\ue000"])
+def test_literal_markers_survive_alongside_nested_math(literal):
+    math = r"$\begin{pmatrix}a&b\\c&d\end{pmatrix}$"
+    raw = literal + " " + math + ". Next sentence."
+    cleaned = clean_latex_formatting(raw)
+    assert cleaned == raw
+    assert split_into_sentences(cleaned) == [literal + " " + math + ".", "Next sentence."]
