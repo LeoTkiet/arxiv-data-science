@@ -3,6 +3,10 @@
 Ngày chuẩn bị: 29/10/2026. Đây là tài liệu để người dùng chuyển cho nhóm;
 chưa gửi thông điệp ra ngoài và chưa có xác nhận TV2–TV5.
 
+Cập nhật 31/10/2026: theo người dùng, A5 tiếp tục chờ nhóm hoàn tất dữ liệu MS1
+để đối chiếu/bàn giao thực tế. Ma trận bên dưới ghi nhận các xác nhận kỹ thuật
+đã có; không đánh đồng việc có schema/mock tests với nghiệm thu corpus.
+
 ## Tài liệu và mã bàn giao
 
 - `docs/MS2_CONTRACTS.md`: audit MS1, schema, adapter envelope, artifact,
@@ -45,7 +49,11 @@ Review độc lập đã kiểm tra schema/docs/examples. Đã sửa mâu thuẫ
 empty body không buộc bibtex rỗng; giữ references nếu còn đọc được `.bib`.
 Ví dụ cũng có cảnh báo khi không cung cấp source map và lý do version empty.
 
-- Chưa làm Resolver, Orchestrator, CLI hay validator MS2 (phần B/C).
+- Resolver phần B đã triển khai trên `feature/m2-tv1-resolver`, kiểm thử bằng
+  corpus/checkpoint giả lập; xem `MS2_RESOLVER.md`. Phần C đã có Orchestrator/CLI
+  offline trên `feature/m2-tv1-orchestrator`, ghép Resolver và Hierarchy đã sửa.
+  Normalization/Bibliography/Deduplication/validator MS2 còn chờ bàn giao; CLI thật
+  báo incomplete thay vì sinh output giả. Adapter TV5 dùng module/stage riêng.
 - Chưa đối chiếu dữ liệu thật của lần crawl đang chạy, chưa nghiệm thu MS1/MS2.
 - Dùng fixture tạm để phát triển ngay; khi có mẫu MS1 hoàn tất, cần nhận cả
   discovery, checkpoint download/extract và sidecar bằng chứng liên quan.
@@ -54,3 +62,11 @@ Ví dụ cũng có cảnh báo khi không cung cấp source map và lý do versi
 - Nhánh bàn giao phần A: `feature/m2-tv1-contracts`, tách từ `origin/main`
   (`c90e79c`) theo yêu cầu người dùng commit/push; không ghép vào PR MS1.
 - Checklist theo dõi nằm tại `docs/checklists/MS2_TV1_CHECKLIST.md`.
+
+Cập nhật kiểm thử phần C ngày 02/11/2026: 29 tests Orchestrator mới, gồm graph,
+resume/force, thêm version, hash artifact, snapshot đổi khi export, input readonly
+và Windows junction. Toàn repo **260 passed, 1 skipped, 61 subtests passed**;
+test skip là trường hợp tạo symlink của Resolver trên host Windows. Hướng dẫn
+chạy và hợp đồng được cập nhật ngay trong README/MS2_CONTRACTS, không thêm
+file kế hoạch cá nhân cho phần C. Tích hợp validator thật của TV5 (C8) và nghiệm
+thu trên corpus thật vẫn chưa hoàn tất.
