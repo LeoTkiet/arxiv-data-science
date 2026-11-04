@@ -301,3 +301,4 @@ def test_safe_path_security_checks(tmp_path):
         safe_path(tmp_path, "../outside.json")
     with pytest.raises(ValueError, match="Absolute or parent"):
         safe_path(tmp_path, "C:/Windows/system.ini")
+
