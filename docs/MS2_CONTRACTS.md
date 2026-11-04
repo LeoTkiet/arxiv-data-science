@@ -164,6 +164,9 @@ Trường bắt buộc ngoài header:
 - `ignored_files: list[str]`: TeX không đi tới được từ root, không xóa source.
 - `merged_body_tex: str`, `preamble_tex: str` (không chứa bibliography trong body).
 - `raw_bibitems: list[str]`: giữ lệnh bibitem và citation key nguyên bản.
+  Resolver hỗ trợ cả môi trường `thebibliography` và `references`; yêu cầu cặp
+  begin/end khớp và không lồng hai môi trường bibliography. Bỏ đúng môi trường
+  khỏi body, giữ nội dung theo sau, Appendix/Acknowledgements và source spans.
 - `bib_file_paths: list[str]`: inventory mọi `.bib`; `referenced_bib_file_paths`
   là tập con đã tham chiếu qua lệnh bibliography được hỗ trợ.
 - `input_snapshot_id: str`, `warnings: list`, `source_spans: list`.
@@ -185,6 +188,21 @@ cả hai danh sách bib rỗng. Không có no_source chỉ vì không tìm thấ
 Root document parent null, position 0. position là thứ tự con, liên tục từ 0
 trong từng parent; nodes xếp preorder. Heading có thể bổ sung `heading_rank`
 và `level`, nhưng không dùng heading_rank thay depth. Prose còn là prose_block.
+
+Giới hạn đã xác nhận trên source `tv3/data/corpus/2411.13795/{v1,v2}/HA.tex`:
+tiêu đề `Introduction.---` được viết bằng `textcolor[rgb]` bọc `textbf`, không có
+lệnh section. Hierarchy hiện không suy diễn heading từ hình thức này, nên tạo
+0 heading; nội dung vẫn nằm trong cây prose. TV2 cần chốt quy tắc heading kiểu
+run-in dựa trên cấu trúc/văn cảnh của source và bổ sung test. Không đổi mọi
+`textbf` hoặc chữ màu thành heading vì có thể là nhấn mạnh trong đoạn văn.
+
+Trong cùng hai source, `references` có 39 bibitem ở v1 và 43 ở v2. Resolver đã
+được kiểm tra trực tiếp trên cả hai file TeX và tách đủ số bibitem khỏi body.
+Đây là kiểm tra source thực tế, không phải nghiệm thu đầy đủ snapshot MS1/MS2
+của paper. Hai file không thuần UTF-8; Resolver dùng fallback Latin-1 có cảnh báo.
+`Fig1.pdf`/`Fig2.pdf` được tham chiếu nhưng không có trong corpus phiên bản.
+Extractor MS1 chỉ giữ `.tex`/`.bib`, nên không thể suy từ corpus rằng gói raw gốc
+thiếu hình. Parser tĩnh giữ lệnh hình/caption, không yêu cầu biên dịch PDF hình.
 
 ### normalized_tree.json — `parsed/<paper_key>/vN/normalized_tree.json`
 

@@ -23,6 +23,7 @@ _MACROS = {'newcommand', 'renewcommand', 'providecommand', 'DeclareRobustCommand
 _HEADINGS = {'part': 1, 'chapter': 2, 'section': 3, 'subsection': 4,
              'subsubsection': 5, 'paragraph': 6, 'subparagraph': 7}
 _REFERENCES = {'references', 'bibliography', 'works cited', 'tài liệu tham khảo'}
+_BIBLIOGRAPHY_ENVS = {'thebibliography', 'references'}
 _COMPILATION_COMMAND = re.compile(
     r'\\(?:input|include|documentclass|bibliography|addbibresource)\b|\\(?:begin|end)\s*\{document\}')
 
@@ -437,23 +438,35 @@ class _Resolver:
     def references(self, preamble, body):
         text = _text(body)
         tokens = list(_tokens(text))
+        # Validate boundaries before a References heading can consume the region.
+        bibliography_ends, opening = {}, None
+        for token in tokens:
+            if token.name == 'begin' and token.value in _BIBLIOGRAPHY_ENVS:
+                if opening is not None:
+                    raise ResolveError('malformed_bibliography', 'Nested bibliography environments are unsupported')
+                opening = token
+            elif token.name == 'end' and token.value in _BIBLIOGRAPHY_ENVS:
+                if opening is None or token.value != opening.value:
+                    raise ResolveError('malformed_bibliography', 'Mismatched bibliography environment end')
+                bibliography_ends[opening.start] = token
+                opening = None
+        if opening is not None:
+            raise ResolveError('malformed_bibliography', f'{opening.value} has no closing environment')
+
         ranges, items = [], []
         index = 0
         while index < len(tokens):
             token = tokens[index]
             end = None
-            if token.name == 'begin' and token.value == 'thebibliography':
-                match = next((j for j in range(index + 1, len(tokens))
-                              if tokens[j].name == 'end' and tokens[j].value == 'thebibliography'), None)
-                if match is None:
-                    raise ResolveError('malformed_bibliography', 'thebibliography has no closing environment')
-                end, content_end = tokens[match].end, tokens[match].start
+            if token.name == 'begin' and token.value in _BIBLIOGRAPHY_ENVS:
+                closing = bibliography_ends[token.start]
+                end, content_end = closing.end, closing.start
             elif token.name in _HEADINGS and token.value.strip().lower() in _REFERENCES:
                 boundary = next((t for t in tokens[index + 1:] if t.name == 'appendix' or
                                  (t.name in _HEADINGS and _HEADINGS[t.name] <= _HEADINGS[token.name])), None)
                 end = content_end = boundary.start if boundary else len(text)
                 closing = next((t for t in tokens[index + 1:] if t.start < end
-                                and t.name == 'end' and t.value == 'thebibliography'), None)
+                                and t.name == 'end' and t.value in _BIBLIOGRAPHY_ENVS), None)
                 if closing:
                     end, content_end = closing.end, closing.start
                 if not any(t.name == 'bibitem' and token.end <= t.start < end for t in tokens):
@@ -464,7 +477,7 @@ class _Resolver:
                 for i, item in enumerate(bibitems):
                     stop = bibitems[i + 1].start if i + 1 < len(bibitems) else content_end
                     stop = next((t.start for t in tokens if item.end <= t.start < stop
-                                 and t.name == 'end' and t.value == 'thebibliography'), stop)
+                                 and t.name == 'end' and t.value in _BIBLIOGRAPHY_ENVS), stop)
                     items.append(text[item.start:stop].strip())
                 ranges.append((token.start, end))
                 while index < len(tokens) and tokens[index].start < end:

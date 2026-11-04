@@ -410,3 +410,64 @@ class ResolverTests(TestCase):
         self.assertEqual(result.status, 'success', result.error)
         self.assertEqual(result.artifacts['gathered'], 'parsed/hep-th_9901001/v2/gathered.json')
         return json.loads((self.output / result.artifacts['gathered']).read_text(encoding='utf-8'))
+
+
+    def test_references_environment_extracts_bibitems_and_keeps_following_body(self):
+        self.main(r'Body \cite{h1}.\begin{references}'
+                  r'\bibitem[Author]{h1} First.\bibitem{h2} Second.'
+                  r'\end{references}\section*{Acknowledgements} Thanks.'
+                  r'\appendix\section{Proof} Appendix text.')
+        doc = self.gathered()
+        self.assertEqual(doc['raw_bibitems'], [r'\bibitem[Author]{h1} First.', r'\bibitem{h2} Second.'])
+        self.assertNotIn('bibitem', doc['merged_body_tex'])
+        self.assertNotIn(r'\begin{references}', doc['merged_body_tex'])
+        for content in [r'\cite{h1}', 'Acknowledgements', r'\appendix', 'Appendix text.']:
+            self.assertIn(content, doc['merged_body_tex'])
+        for span in doc['source_spans']:
+            source = (self.source / span['source_path']).read_bytes().decode('utf-8')
+            self.assertEqual(doc['merged_body_tex'][span['start']:span['end']],
+                             source[span['source_start']:span['source_end']])
+
+    def test_references_environment_with_heading_does_not_swallow_acknowledgements(self):
+        self.main(r'Body\section*{References}\begin{references}'
+                  r'\bibitem{h1} Entry.\end{references}Unsectioned thanks.')
+        doc = self.gathered()
+        self.assertEqual(doc['raw_bibitems'], [r'\bibitem{h1} Entry.'])
+        self.assertIn('Unsectioned thanks.', doc['merged_body_tex'])
+
+    def test_references_environment_requires_matching_end(self):
+        for heading in ['', r'\section*{References}']:
+            for ending in ['', r'\end{thebibliography}']:
+                with self.subTest(heading=heading, ending=ending):
+                    self.main('Body' + heading + r'\begin{references}\bibitem{h1} Entry.' + ending)
+                    result = self.run_resolver()
+                    self.assertEqual(result.status, 'data_error')
+                    self.assertEqual(result.error.kind, 'malformed_bibliography')
+
+    def test_literal_references_environment_is_not_interpreted(self):
+        self.main(r'\begin{verbatim}\begin{references}\bibitem{x} Example.'
+                  r'\end{references}\end{verbatim}Body.')
+        doc = self.gathered()
+        self.assertEqual(doc['raw_bibitems'], [])
+        self.assertIn(r'\begin{references}', doc['merged_body_tex'])
+
+
+    def test_empty_references_environment_is_removed(self):
+        self.main(r'Body\begin{references}\end{references}After.')
+        doc = self.gathered()
+        self.assertEqual(doc['raw_bibitems'], [])
+        self.assertNotIn('references', doc['merged_body_tex'])
+        self.assertIn('After.', doc['merged_body_tex'])
+
+    def test_references_environment_hands_bibitems_to_real_bibliography(self):
+        from arxiv_pipeline.parsing import bibliography
+        self.main(r'Body \cite{h1,h2}.\begin{references}'
+                  r'\bibitem{h1} Author. First title. 2020.'
+                  r'\bibitem{h2} Other. Second title. 2021.\end{references}')
+        resolved = self.run_resolver()
+        self.assertEqual(resolved.status, 'success', resolved.error)
+        result = bibliography.run(self.record, self.output, version=self.version,
+            upstream={'context': self.upstream['context'], 'stages': {'resolve': resolved.to_dict()}})
+        self.assertEqual(result.status, 'success', result.error)
+        payload = json.loads((self.output / result.artifacts['raw_bibtex']).read_text(encoding='utf-8'))
+        self.assertEqual({row['citation_key'] for row in payload['entries']}, {'h1', 'h2'})

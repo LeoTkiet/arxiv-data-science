@@ -66,8 +66,10 @@ Errors/skipped không khai báo artifact success; file gathered cũ nếu có kh
 
 ## References và truy vết
 
-- Bóc raw bibitem (giữ optional label và citation key) từ thebibliography hoặc
-  heading References/Bibliography chứa bibitem; bỏ đúng phạm vi đó khỏi body.
+- Bóc raw bibitem (giữ optional label và citation key) từ môi trường
+  `thebibliography`/`references` hoặc heading References/Bibliography chứa bibitem;
+  bỏ đúng phạm vi đó khỏi body. Cặp begin/end bibliography phải khớp; môi trường
+  bibliography lồng nhau không được hỗ trợ và trả `malformed_bibliography`.
   Heading kế tiếp cùng cấp/cao hơn kết thúc phạm vi References, giữ Appendix và
   Acknowledgements. Không loại `\cite{...}` khỏi body.
 - Thu thập inventory `.bib`; nhận diện bibliography/addbibresource ở preamble
