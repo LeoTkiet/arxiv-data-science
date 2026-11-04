@@ -304,3 +304,81 @@ StageResult schema 2.0, artifact `validation` là JSON object có schema_version
 arxiv_id và valid=true khi status success/no_source. Module dự kiến vẫn là
 `reporting/milestone2/validation.py`; không thay validator MS1. Kết quả cấp paper
 chỉ complete khi export và validator MS2 cùng terminal, dù bảng export đã đủ.
+
+## 9. Bàn giao validator MS2 cho TV5
+
+TV5 phụ trách validator và báo cáo MS2; TV1 phụ trách điều phối và bàn giao kết
+quả parsing. Phần này hướng dẫn module cần triển khai, không phải validator đã có.
+Có thể chạy Resolver → Hierarchy → Normalization và Resolver → Bibliography,
+rồi Deduplication trước TV5. Không dùng mock adapter khi chạy dữ liệu thật.
+
+### Điểm nối đã có trong pipeline
+
+- Module: `src/arxiv_pipeline/reporting/milestone2/validation.py`.
+- Chữ ký: `run(record, output_dir, *, version=None, upstream=None) -> StageResult`.
+- Chạy một lần cho paper, sau deduplicate; `version=None`.
+- `upstream.context` có `input_root` runtime và `input_snapshot_id` cấp paper.
+- `upstream.stages.deduplicate` là StageResult dạng dict, gồm schema 2.0,
+  `paper_id`, `version=None`, status và đường dẫn artifact tương đối với MS2 output.
+- Đọc `elements`, `hierarchy`, `bibtex`, `parsing_manifest` từ map artifacts này;
+  `bibtex_file` là văn bản BibTeX UTF-8, không đọc như JSON. Lấy occurrences từng
+  version từ `parsing_manifest.versions[].artifacts.occurrences`.
+- Đối chiếu `record.versions` với manifest và snapshot hiện tại. Không lấy file
+  mặc định cũ thay thế artifact thiếu hoặc khác paper/version/snapshot. Xác minh
+  đường dẫn không tuyệt đối, không `..`, không junction/symlink thoát output root.
+- Nếu cần đối chiếu counts trước dedup với dữ liệu thật, đọc artifact của normalize
+  và bibliography qua checkpoint tương ứng tại `state/stages/`; không suy counts
+  trước dedup từ bảng cuối, hoặc tin counts khai báo mà không kiểm tra nguồn.
+
+### Các kiểm tra TV5 cần triển khai
+
+1. Schema đúng các trường quy định cho từng bảng ở mục 2; kiểu dữ liệu, kind và khóa
+   đúng phạm vi paper. Giữ hierarchy đúng **bốn cột**; không thêm position/order.
+2. Khóa element duy nhất, cạnh hierarchy tham chiếu element/parent tồn tại; version
+   thuộc discovery. Root document không tạo cạnh với parent null.
+3. Occurrence ID duy nhất trong version, parent cùng version, không chu trình,
+   thứ tự position liên tục theo từng parent và cây được nối đúng root. Đối chiếu
+   cạnh occurrence với hierarchy theo số lần xuất hiện, không dùng set làm mất
+   các cạnh trùng hợp lệ sau dedup.
+4. Bao phủ tất cả version kỳ vọng, gồm `no_source` có reason và tree/occurrences
+   rỗng hợp lệ. Paper chỉ có BibTeX vẫn được giữ references; không ép bibtex rỗng
+   chỉ vì không có TeX. Không biến version thiếu/lỗi thành `no_source`.
+5. Citation keys sau rename đồng bộ với bảng bibtex và references.bib. Ghi rõ key
+   không tìm thấy và xung đột BibTeX bằng diagnostics; không âm thầm bỏ cảnh báo.
+6. Counts trước/sau khớp artifact, occurrence không mất sau dedup, nội dung/kind
+   không bị gộp sai. Đọc warnings đã có, bao gồm `bib_field_conflict`; quy định rõ
+   warning nào cần xem thủ công và lỗi nào làm validation thất bại.
+
+### Kết quả trả về và xử lý lỗi
+
+Ghi atomic JSON tại `validation/parsing/<paper_key>.json`, rồi trả StageResult:
+`stage="validate_parse"`, `paper_id=record["arxiv_id"]`, `version=None`,
+`schema_version="2.0"`, artifacts `{"validation": "validation/parsing/<paper_key>.json"}`.
+Khi kiểm định thực sự qua, trả `status="success"`; paper empty hợp lệ vẫn phải
+được kiểm tra trước khi xác nhận valid. Lỗi nội dung trả `data_error` kèm ErrorInfo;
+lỗi đọc/ghi trả `error`, upstream bị chặn trả `skipped`. Không trả success khi
+chưa thực hiện kiểm tra hoặc khi artifact có `valid=false`.
+
+Ba trường JSON mà Orchestrator hiện kiểm tra bắt buộc là `schema_version="2.0"`,
+`arxiv_id` đúng paper và `valid` là boolean; với status terminal, phải `valid=true`.
+TV5 nên bổ sung `input_snapshot_id`, diagnostics/errors/warnings, counts và tên
+checks đã chạy để truy vết. Các field bổ sung này chưa được Orchestrator xác minh
+tự động; TV5 phải đối chiếu snapshot và tính đúng đắn của kết quả trong adapter.
+
+### Nối vào kết quả đã chạy và nghiệm thu tích hợp
+
+1. Giữ nguyên snapshot và output đã parse. Cài module validator thật trong cùng
+   checkout rồi chạy lại `--stage parse ... --resume`; không dùng `--force` chỉ
+   để bổ sung validator, không chạy lại MS1.
+2. Pipeline thử lại checkpoint `validate_parse` từng `not_implemented`; các stage
+   terminal không đổi còn đủ hash được dùng lại. Khi đầu vào, mã module hoặc
+   artifact đổi, stage liên quan và downstream được chạy lại đúng dependency.
+3. Xác minh `validation` StageResult và JSON xuất ra. `complete=true` trong
+   `parsing_manifest` là độ đầy đủ của export; chỉ `parsing_summary` và trạng thái
+   pipeline cấp paper mới tổng hợp cả validation. CLI mã 1 trước khi có TV5 không
+   tự chứng minh parsing lỗi, cũng không được coi là nghiệm thu đã qua.
+4. Tests cần có: dữ liệu đúng, cạnh/khóa sai, thiếu version, cycle/thứ tự sai,
+   cạnh occurrence trùng hợp lệ, `no_source`, BibTeX-only, citation thiếu, path
+   không an toàn, JSON hỏng, snapshot sai, `valid=false` và resume chạy validator
+   mới mà không dựng lại các bảng không thay đổi. Tiếp đó chạy corpus mẫu thật
+   đa version/no_source trước khi nghiệm thu toàn nhóm.
