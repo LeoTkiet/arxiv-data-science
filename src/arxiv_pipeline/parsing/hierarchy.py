@@ -51,41 +51,119 @@ EXCLUDED_HEADING_KEYWORDS = {"references", "bibliography", "works cited", "tài 
 LITERAL_ENVIRONMENTS = {"verbatim", "verbatim*", "lstlisting", "minted"}
 
 
-def _next_heading(text, pos, heading_re):
-    """Find a structural heading without entering literal, math or leaf blocks."""
+# Regex for formatted heading prefixes: \textcolor + \textbf or \textbf + \textcolor
+_FORMATTED_HEADING_PREFIX_RE = re.compile(
+    r"(?:\\noindent\s*)?"
+    r"(?:"
+    r"\\textcolor\b(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}\s*\{\s*\\textbf\b\s*\{"
+    r"|"
+    r"\\textbf\b\s*\{\s*\\textcolor\b(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}\s*\{"
+    r")"
+)
+
+
+def _match_formatted_heading(text: str, start_idx: int, preceding_text: str) -> tuple[int, int, str, str] | None:
+    """Matches a controlled formatted heading such as \\textcolor{...}{\\textbf{...}}.
+
+    Returns (start_idx, end_idx, title_content, raw_content) or None.
+    Controlled rules:
+    - Must be at a paragraph boundary (preceded by blank lines, start of text, \\maketitle, etc.).
+    - Inner title length <= 150 chars, non-empty, and does not contain paragraph breaks.
+    """
+    prefix_m = _FORMATTED_HEADING_PREFIX_RE.match(text, start_idx)
+    if not prefix_m:
+        return None
+
+    clean_prec = re.sub(r"(?<!\\)%.*$", "", preceding_text, flags=re.MULTILINE)
+    is_at_start = (
+        not clean_prec.strip()
+        or bool(re.search(r"(\n\s*\n|\\par\b|\A)\s*$", clean_prec))
+        or bool(re.search(r"\\(?:maketitle|newpage|clearpage)\b\s*$", clean_prec))
+    )
+    if not is_at_start:
+        return None
+
+    inner_open = prefix_m.end() - 1
+    title, inner_end = extract_braced_argument(text, inner_open)
+    if not title or len(title.strip()) > 150 or "\n\n" in title:
+        return None
+
+    pos_after = inner_end
+    while pos_after < len(text) and text[pos_after].isspace():
+        pos_after += 1
+    if pos_after < len(text) and text[pos_after] == "}":
+        full_end = pos_after + 1
+    else:
+        full_end = inner_end
+
+    raw = text[prefix_m.start():full_end]
+    return prefix_m.start(), full_end, title.strip(), raw
+
+
+class _HeadingMatch:
+    """Unified container for standard macro headings and formatted headings."""
+    __slots__ = ("start", "end", "rank", "title", "raw")
+
+    def __init__(self, start: int, end: int, rank: int, title: str, raw: str):
+        self.start = start
+        self.end = end
+        self.rank = rank
+        self.title = title
+        self.raw = raw
+
+
+def _next_heading(text: str, pos: int, heading_re: re.Pattern) -> _HeadingMatch | None:
+    """Find a structural or controlled formatted heading without entering literal, math or leaf blocks."""
     command_re = re.compile(r"\\[A-Za-z]+|\\.|\$\$?", re.DOTALL)
     atomic_envs = FIGURE_ENVIRONMENTS | BLOCK_MATH_ENVIRONMENTS | LITERAL_ENVIRONMENTS
-    while match := command_re.search(text, pos):
+    scan_pos = pos
+    while match := command_re.search(text, scan_pos):
         token = match.group()
-        heading = heading_re.match(text, match.start())
-        if heading:
-            return heading
-        pos = match.end()
+        m_start = match.start()
+
+        # Check standard heading command (\section, \subsection, etc.)
+        standard_m = heading_re.match(text, m_start)
+        if standard_m:
+            heading_cmd = standard_m.group(1).lower()
+            rank = HEADING_RANKS.get(heading_cmd, 3)
+            brace_start = standard_m.end() - 1
+            title, end_pos = extract_braced_argument(text, brace_start)
+            raw = text[m_start:end_pos]
+            return _HeadingMatch(m_start, end_pos, rank, title, raw)
+
+        # Check controlled formatted heading (\textcolor + \textbf)
+        preceding = text[pos:m_start]
+        formatted = _match_formatted_heading(text, m_start, preceding)
+        if formatted:
+            f_start, f_end, f_title, f_raw = formatted
+            return _HeadingMatch(f_start, f_end, 3, f_title, f_raw)
+
+        scan_pos = match.end()
         if token == r"\begin":
-            env_match = re.match(r"\s*\{([^}]+)\}", text[pos:])
+            env_match = re.match(r"\s*\{([^}]+)\}", text[scan_pos:])
             if env_match and env_match.group(1) in atomic_envs:
                 # find_matching_end_env expects the original exact begin tag.
-                tag_start = text.find('{', pos)
+                tag_start = text.find('{', scan_pos)
                 end = find_matching_end_env(text, tag_start - len(r'\begin'), env_match.group(1))
-                pos = max(pos, end)
+                scan_pos = max(scan_pos, end)
         elif token == r"\verb":
-            if pos < len(text) and text[pos] == '*':
-                pos += 1
-            if pos < len(text):
-                close = text.find(text[pos], pos + 1)
-                pos = len(text) if close == -1 else close + 1
+            if scan_pos < len(text) and text[scan_pos] == '*':
+                scan_pos += 1
+            if scan_pos < len(text):
+                close = text.find(text[scan_pos], scan_pos + 1)
+                scan_pos = len(text) if close == -1 else close + 1
         elif token in {'$', '$$', r'\[', r'\('}:
             closing = {r'\[': r'\]', r'\(': r'\)'}.get(token, token)
-            close = text.find(closing, pos)
+            close = text.find(closing, scan_pos)
             while close > 0 and text[close - 1] == '\\':
                 close = text.find(closing, close + len(closing))
-            pos = len(text) if close == -1 else close + len(closing)
+            scan_pos = len(text) if close == -1 else close + len(closing)
     return None
 
 
 def extract_braced_argument(text: str, start_pos: int) -> tuple[str, int]:
     """Extracts a balanced {...} argument starting at or after start_pos.
-    
+
     Returns (argument_content, end_pos_after_closing_brace).
     """
     open_idx = text.find("{", start_pos)
@@ -219,8 +297,8 @@ class HierarchyBuilder:
         text_len = len(merged_body_tex)
 
         while pos < text_len:
-            match = _next_heading(merged_body_tex, pos, heading_re)
-            if not match:
+            heading = _next_heading(merged_body_tex, pos, heading_re)
+            if not heading:
                 # Không còn tiêu đề nào -> xử lý toàn bộ đoạn văn bản còn lại dưới nút cha hiện tại
                 remaining_text = merged_body_tex[pos:].strip()
                 if remaining_text:
@@ -229,44 +307,37 @@ class HierarchyBuilder:
                         self._parse_body_content(remaining_text, current_parent_id)
                 break
 
-            match_start = match.start()
-            heading_cmd = match.group(1).lower()
-            rank = HEADING_RANKS.get(heading_cmd, 3)
-
             # Văn bản nằm trước lệnh tiêu đề này thuộc về tiêu đề trước đó
-            preceding_text = merged_body_tex[pos:match_start].strip()
+            preceding_text = merged_body_tex[pos:heading.start].strip()
             if preceding_text:
                 current_parent_id, is_excluded = self._get_current_parent(stack)
                 if not is_excluded:
                     self._parse_body_content(preceding_text, current_parent_id)
 
-            # Lấy toàn bộ tiêu đề (xử lý ngoặc nhọn lồng nhau)
-            brace_start = match.end() - 1
-            title_content, pos = extract_braced_argument(merged_body_tex, brace_start)
-
             # Kiểm tra xem tiêu đề này có phải là References / Bibliography bị loại trừ không
-            clean_title = re.sub(r"\\[a-zA-Z]+|\s+", " ", title_content).strip().lower()
+            clean_title = re.sub(r"\\[a-zA-Z]+|\s+", " ", heading.title).strip().lower()
             is_excluded_section = clean_title in EXCLUDED_HEADING_KEYWORDS
 
             # Lùi stack tìm cha phù hợp (cha phải có rank nhỏ hơn tiêu đề hiện tại)
-            while len(stack) > 1 and stack[-1][0] >= rank:
+            while len(stack) > 1 and stack[-1][0] >= heading.rank:
                 stack.pop()
 
             parent_rank, parent_id, parent_is_excluded = stack[-1]
 
             if not is_excluded_section and not parent_is_excluded:
-                heading_raw = merged_body_tex[match_start:pos]
                 node = self._add_node(
                     parent_temp_id=parent_id,
                     kind="heading",
-                    raw_content=heading_raw.strip(),
-                    level=rank,
-                    heading_rank=rank,
+                    raw_content=heading.raw.strip(),
+                    level=heading.rank,
+                    heading_rank=heading.rank,
                 )
-                stack.append((rank, node.temp_id, False))
+                stack.append((heading.rank, node.temp_id, False))
             else:
                 # Đánh dấu nhánh này bị loại trừ
-                stack.append((rank, parent_id, True))
+                stack.append((heading.rank, parent_id, True))
+
+            pos = heading.end
 
         return self.nodes
 
