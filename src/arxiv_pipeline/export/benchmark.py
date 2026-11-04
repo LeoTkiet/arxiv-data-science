@@ -1,11 +1,14 @@
 """Benchmark and Performance Profiling Harness for Milestone 2 (TV5).
 
-Measures:
-- Running time (time.perf_counter) end-to-end and per-paper
-- Memory footprint (psutil sampling background thread every 0.2s: peak RAM, avg RAM)
-- Output storage footprint (MB) of tables and artifacts
-- Environment specifications (CPU model, cores, total RAM, Python version)
-Generates `summaries/parsing_summary.json` matching official schema.
+Features:
+- Live Pipeline Execution: Executes `pipeline.parse.run(...)` directly under active monitoring.
+- Memory Profiling: `MemorySampler` background thread polling process RSS via `psutil` every 0.2s.
+- Time Profiling: High-precision `time.perf_counter()` for end-to-end wall time.
+- Output Footprint: Computes actual disk usage of generated tables and artifacts.
+- Exact Statistics:
+  - `parsing_success_rate_pct` calculated strictly on `successfully_parsed_publications`.
+  - `citations_renamed_count` computed from actual citation rewriting across publications.
+- Zero Fake Defaults: Eliminates hardcoded synthetic defaults.
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import sys
 import threading
 import time
@@ -20,6 +24,11 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+
+_CITE_RE = re.compile(
+    r"\\(?:cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|nocite|"
+    r"parencite|textcite|autocite|footcite|smartcite)\*?\s*(?:\[[^\]]*\]\s*){0,2}\{([^}]+)\}"
+)
 
 
 def get_cpu_model() -> str:
@@ -116,6 +125,58 @@ def calculate_storage_mb(directory: Path | str) -> float:
     return round(total_bytes / (1024 * 1024), 2)
 
 
+def count_renamed_citations_for_paper(output_dir: Path, key: str) -> int:
+    """Calculate how many citations were actually rewritten during deduplication."""
+    from arxiv_pipeline.parsing.deduplication import unionize_bibtex
+
+    state_bib = output_dir / f"state/stages/bibliography/{key}"
+    state_norm = output_dir / f"state/stages/normalize/{key}"
+    if not state_bib.exists() or not state_norm.exists():
+        return 0
+
+    bib_entries = []
+    for bib_file in sorted(state_bib.glob("*.json")):
+        if bib_file.name == "paper.json":
+            continue
+        try:
+            doc = json.loads(bib_file.read_text(encoding="utf-8"))
+            v_num = doc.get("version")
+            raw_art = doc.get("artifacts", {}).get("raw_bibtex")
+            if raw_art and (output_dir / raw_art).exists():
+                raw_doc = json.loads((output_dir / raw_art).read_text(encoding="utf-8"))
+                bib_entries.append((v_num, raw_doc.get("entries", [])))
+        except Exception:
+            pass
+
+    if not bib_entries:
+        return 0
+
+    _, key_mapping, _ = unionize_bibtex(bib_entries)
+    if not key_mapping:
+        return 0
+
+    renamed_count = 0
+    for norm_file in sorted(state_norm.glob("*.json")):
+        if norm_file.name == "paper.json":
+            continue
+        try:
+            doc = json.loads(norm_file.read_text(encoding="utf-8"))
+            art = doc.get("artifacts", {}).get("normalized_tree")
+            if art and (output_dir / art).exists():
+                tree_doc = json.loads((output_dir / art).read_text(encoding="utf-8"))
+                for node in tree_doc.get("nodes", []):
+                    text = node.get("cleaned_content", "")
+                    for match in _CITE_RE.finditer(text):
+                        for token in re.split(r"\s*,\s*", match.group(1)):
+                            k = token.strip()
+                            if k in key_mapping and key_mapping[k] != k:
+                                renamed_count += 1
+        except Exception:
+            pass
+
+    return renamed_count
+
+
 def generate_parsing_summary(
     output_dir: Path | str,
     wall_time_sec: float,
@@ -125,7 +186,7 @@ def generate_parsing_summary(
     total_assigned: int | None = None,
     environment_label: str = "Google Colab CPU-only",
 ) -> dict[str, Any]:
-    """Aggregate stats from parsing manifests and create parsing_summary dict."""
+    """Aggregate stats from parsing manifests and create parsing_summary dict without assumptions."""
     output = Path(output_dir).resolve()
     manifest_file = output / "manifests/parsing.json"
 
@@ -141,8 +202,9 @@ def generate_parsing_summary(
     empty_papers = [p for p in paper_outcomes if p.get("complete") and p.get("status") == "no_source"]
     success_count = len(successful_papers)
     empty_count = len(empty_papers)
-    parsed_pub_count = success_count + empty_count
-    success_rate_pct = round((parsed_pub_count / total_assigned) * 100, 2) if total_assigned else 0.0
+
+    # Strictly compute success rate on successfully parsed publications (with source)
+    success_rate_pct = round((success_count / total_assigned) * 100, 2) if total_assigned else 0.0
 
     total_versions = sum(len(p.get("expected_versions", [])) for p in paper_outcomes)
     parsed_versions = sum(
@@ -177,6 +239,7 @@ def generate_parsing_summary(
                     bibtex_after += counts.get("bibtex_after", 0)
                 except Exception:
                     pass
+            citations_renamed += count_renamed_citations_for_paper(output, p_dir.name)
 
     elem_reduction_pct = (
         round(((elements_before - elements_after) / elements_before) * 100, 2)
@@ -220,29 +283,86 @@ def generate_parsing_summary(
     }
 
 
+def execute_pipeline_benchmark(
+    ms1_input: Path | str,
+    output_dir: Path | str,
+    *,
+    identifiers: list[str] | None = None,
+    resume: bool = False,
+    summary_out: Path | str | None = None,
+    total_assigned: int | None = None,
+) -> dict[str, Any]:
+    """Execute the real pipeline while monitoring time and memory, then generate parsing_summary."""
+    from arxiv_pipeline.pipeline.parse import run as run_parse
+
+    out = Path(output_dir).resolve()
+    with MemorySampler(0.2) as sampler:
+        t0 = time.perf_counter()
+        parse_summary = run_parse(
+            input_root=ms1_input,
+            output=output_dir,
+            identifiers=identifiers,
+            resume=resume,
+        )
+        wall_time = time.perf_counter() - t0
+        peak_mb, avg_mb, _ = sampler.stop()
+
+    total = total_assigned or parse_summary.get("papers") or 1
+    summary = generate_parsing_summary(
+        out,
+        wall_time_sec=wall_time,
+        peak_ram_mb=peak_mb,
+        avg_ram_mb=avg_mb,
+        total_assigned=total,
+    )
+
+    if summary_out:
+        out_path = Path(summary_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Parsing summary saved to: {out_path}")
+
+    return summary
+
+
 def main():
-    parser = argparse.ArgumentParser(description="TV5 Benchmark & Performance Profiling")
+    parser = argparse.ArgumentParser(description="TV5 Live Benchmark & Performance Profiling")
+    parser.add_argument("--ms1-input", help="Directory of MS1 input snapshot (runs live pipeline)")
     parser.add_argument("--output", required=True, help="Directory containing MS2 parsing outputs")
+    parser.add_argument("--ids", help="Comma-separated arXiv IDs to parse")
+    parser.add_argument("--resume", action="store_true", help="Resume parsing using existing checkpoints")
     parser.add_argument("--summary-out", default="summaries/parsing_summary.json", help="Path to write parsing_summary.json")
-    parser.add_argument("--total-assigned", type=int, default=1000, help="Total assigned papers")
-    parser.add_argument("--wall-time", type=float, default=412.5, help="Measured wall time in seconds")
-    parser.add_argument("--peak-ram", type=float, default=642.8, help="Peak RAM in MB")
-    parser.add_argument("--avg-ram", type=float, default=418.2, help="Avg RAM in MB")
+    parser.add_argument("--total-assigned", type=int, default=None, help="Total assigned papers for assignment metrics")
+    parser.add_argument("--wall-time", type=float, default=None, help="Measured wall time in seconds (if profiling offline)")
+    parser.add_argument("--peak-ram", type=float, default=None, help="Peak RAM in MB (if profiling offline)")
+    parser.add_argument("--avg-ram", type=float, default=None, help="Avg RAM in MB (if profiling offline)")
     args = parser.parse_args()
 
-    summary = generate_parsing_summary(
-        args.output,
-        wall_time_sec=args.wall_time,
-        peak_ram_mb=args.peak_ram,
-        avg_ram_mb=args.avg_ram,
-        total_assigned=args.total_assigned,
-    )
-    out_path = Path(args.summary_out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"Summary written to {out_path}")
+    if args.ms1_input:
+        ids_list = [i.strip() for i in args.ids.split(",")] if args.ids else None
+        execute_pipeline_benchmark(
+            ms1_input=args.ms1_input,
+            output_dir=args.output,
+            identifiers=ids_list,
+            resume=args.resume,
+            summary_out=args.summary_out,
+            total_assigned=args.total_assigned,
+        )
+    else:
+        if args.wall_time is None or args.peak_ram is None or args.avg_ram is None:
+            parser.error("Offline profiling requires explicit --wall-time, --peak-ram, and --avg-ram (no synthetic defaults).")
+        summary = generate_parsing_summary(
+            args.output,
+            wall_time_sec=args.wall_time,
+            peak_ram_mb=args.peak_ram,
+            avg_ram_mb=args.avg_ram,
+            total_assigned=args.total_assigned,
+        )
+        out_path = Path(args.summary_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"Summary written to {out_path}")
 
 
 if __name__ == "__main__":
     main()
-

@@ -79,12 +79,18 @@ def make_valid_dataset(tmp_path: Path):
             {"occurrence_id": f"o_s1_{v}", "parent_occurrence_id": f"o_h1_{v}", "position": 0, "element_id": f"{PREFIX}s1"},
         ]
         if v == 1:
-            occs.append({"occurrence_id": "o_eq1_1", "parent_occurrence_id": "o_h1_1", "position": 1, "element_id": f"{PREFIX}eq1"})
-        atomic_json(v_dir / "occurrences.json", {"schema_version": PARSING_SCHEMA_VERSION, "version": v, "occurrences": occs})
+            occs.append({"occurrence_id": "o_eq1_1", "parent_occurrence_id": f"o_h1_{v}", "position": 1, "element_id": f"{PREFIX}eq1"})
+        atomic_json(v_dir / "occurrences.json", {
+            "schema_version": PARSING_SCHEMA_VERSION,
+            "arxiv_id": PAPER,
+            "version": v,
+            "occurrences": occs,
+        })
 
     manifest = {
         "schema_version": PARSING_SCHEMA_VERSION,
         "arxiv_id": PAPER,
+        "input_snapshot_id": "snap-123",
         "complete": True,
         "expected_versions": [1, 2],
         "versions": [
@@ -157,6 +163,119 @@ def test_valid_dataset_passes_validation(tmp_path):
     assert doc["errors"] == []
 
 
+def test_repeated_element_multiple_occurrences_is_valid(tmp_path):
+    """Crucial test for Issue 1: repeated occurrences of element s1 under h1 produces
+
+    duplicate (s1, h1) rows in hierarchy, which is valid and must NOT trigger multiple_parents error.
+    """
+    upstream = make_valid_dataset(tmp_path)
+
+    # In version 1: s1 appears twice under h1
+    v1_occs_file = tmp_path / f"parsed/{KEY}/v1/occurrences.json"
+    occs_doc = json.loads(v1_occs_file.read_text(encoding="utf-8"))
+    occs = [
+        {"occurrence_id": "o_root_1", "parent_occurrence_id": None, "position": 0, "element_id": f"{PREFIX}root1"},
+        {"occurrence_id": "o_h1_1", "parent_occurrence_id": "o_root_1", "position": 0, "element_id": f"{PREFIX}h1"},
+        {"occurrence_id": "o_s1_first", "parent_occurrence_id": "o_h1_1", "position": 0, "element_id": f"{PREFIX}s1"},
+        {"occurrence_id": "o_s1_second", "parent_occurrence_id": "o_h1_1", "position": 1, "element_id": f"{PREFIX}s1"},
+    ]
+    atomic_json(v1_occs_file, dict(occs_doc, occurrences=occs))
+
+    # In hierarchy: s1 has TWO rows under h1 for version 1
+    hier_file = tmp_path / f"tables/{KEY}/hierarchy.json"
+    hier_data = [
+        {"arxiv_id": PAPER, "version": 1, "element_id": f"{PREFIX}h1", "parent_id": f"{PREFIX}root1"},
+        {"arxiv_id": PAPER, "version": 1, "element_id": f"{PREFIX}s1", "parent_id": f"{PREFIX}h1"},
+        {"arxiv_id": PAPER, "version": 1, "element_id": f"{PREFIX}s1", "parent_id": f"{PREFIX}h1"},
+        {"arxiv_id": PAPER, "version": 2, "element_id": f"{PREFIX}h1", "parent_id": f"{PREFIX}root2"},
+        {"arxiv_id": PAPER, "version": 2, "element_id": f"{PREFIX}s1", "parent_id": f"{PREFIX}h1"},
+    ]
+    atomic_json(hier_file, hier_data)
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "success"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert report["valid"] is True
+    assert report["checks"]["tree_validity"] is True
+
+
+def test_snapshot_mismatch_fails_validation(tmp_path):
+    """Issue 4 test: manifest.input_snapshot_id must match context.input_snapshot_id."""
+    upstream = make_valid_dataset(tmp_path)
+    upstream["context"]["input_snapshot_id"] = "changed-snapshot-456"
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert report["valid"] is False
+    assert any(e["code"] == "snapshot_mismatch" for e in report["errors"])
+
+
+def test_missing_artifact_declaration_fails_without_fallback(tmp_path):
+    """Issue 5 test: if upstream does not declare an artifact, validator must NOT fall back to disk."""
+    upstream = make_valid_dataset(tmp_path)
+    # Remove hierarchy from declared artifacts
+    del upstream["stages"]["deduplicate"]["artifacts"]["hierarchy"]
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert report["valid"] is False
+    assert any(e["code"] == "missing_artifact_declaration" for e in report["errors"])
+
+
+def test_hierarchy_occurrence_mismatch_fails(tmp_path):
+    """Issue 2 test: hierarchy rows must match occurrence edges with exact multiset count."""
+    upstream = make_valid_dataset(tmp_path)
+    hier_file = tmp_path / f"tables/{KEY}/hierarchy.json"
+    hier_data = json.loads(hier_file.read_text(encoding="utf-8"))
+    # Add a ghost hierarchy edge not present in occurrences
+    hier_data.append({"arxiv_id": PAPER, "version": 1, "element_id": f"{PREFIX}eq1", "parent_id": f"{PREFIX}root1"})
+    atomic_json(hier_file, hier_data)
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert report["valid"] is False
+    assert any(e["code"] == "hierarchy_occurrence_mismatch" for e in report["errors"])
+
+
+def test_occurrence_cycle_fails_validation(tmp_path):
+    """Issue 2 test: cycle in occurrences tree is caught."""
+    upstream = make_valid_dataset(tmp_path)
+    v1_occs_file = tmp_path / f"parsed/{KEY}/v1/occurrences.json"
+    occs_doc = json.loads(v1_occs_file.read_text(encoding="utf-8"))
+    # Introduce cycle: o_h1_1 -> o_s1_1 -> o_h1_1
+    for occ in occs_doc["occurrences"]:
+        if occ["occurrence_id"] == "o_h1_1":
+            occ["parent_occurrence_id"] = "o_s1_1"
+    atomic_json(v1_occs_file, occs_doc)
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert report["valid"] is False
+    assert any(e["code"] == "occurrence_cycle" for e in report["errors"])
+
+
+def test_occurrence_non_continuous_positions_fails(tmp_path):
+    """Positions under parent must be 0, 1, ..., k-1."""
+    upstream = make_valid_dataset(tmp_path)
+    v1_occs_file = tmp_path / f"parsed/{KEY}/v1/occurrences.json"
+    occs_doc = json.loads(v1_occs_file.read_text(encoding="utf-8"))
+    # In version 1, o_eq1_1 is position 1, change to position 5 (discontinuous)
+    for occ in occs_doc["occurrences"]:
+        if occ["occurrence_id"] == "o_eq1_1":
+            occ["position"] = 5
+    atomic_json(v1_occs_file, occs_doc)
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert report["valid"] is False
+    assert any(e["code"] == "non_continuous_occurrence_positions" for e in report["errors"])
+
+
 def test_no_source_dataset_passes_with_no_source_status(tmp_path):
     tables_dir = tmp_path / f"tables/{KEY}"
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -168,11 +287,17 @@ def test_no_source_dataset_passes_with_no_source_status(tmp_path):
 
     v_dir = tmp_path / f"parsed/{KEY}/v1"
     v_dir.mkdir(parents=True, exist_ok=True)
-    atomic_json(v_dir / "occurrences.json", {"schema_version": PARSING_SCHEMA_VERSION, "version": 1, "occurrences": []})
+    atomic_json(v_dir / "occurrences.json", {
+        "schema_version": PARSING_SCHEMA_VERSION,
+        "arxiv_id": PAPER,
+        "version": 1,
+        "occurrences": [],
+    })
 
     manifest = {
         "schema_version": PARSING_SCHEMA_VERSION,
         "arxiv_id": PAPER,
+        "input_snapshot_id": "snap-empty",
         "complete": True,
         "expected_versions": [1],
         "versions": [{"version": 1, "status": "no_source", "artifacts": {"occurrences": f"parsed/{KEY}/v1/occurrences.json"}}],
@@ -242,7 +367,6 @@ def test_duplicate_kind_content_fails_business_rule(tmp_path):
     upstream = make_valid_dataset(tmp_path)
     elems_file = tmp_path / f"tables/{KEY}/elements.json"
     data = json.loads(elems_file.read_text(encoding="utf-8"))
-    # Add another sentence with exact same content but different ID
     data.append({"element_id": f"{PREFIX}s2_dup", "arxiv_id": PAPER, "kind": "sentence", "content": data[3]["content"]})
     atomic_json(elems_file, data)
 
@@ -267,21 +391,6 @@ def test_foreign_key_missing_fails_referential_integrity(tmp_path):
     assert any(e["code"] == "foreign_key_missing_child" for e in report["errors"])
 
 
-def test_self_loop_and_cycles_fail_tree_validity(tmp_path):
-    upstream = make_valid_dataset(tmp_path)
-    hier_file = tmp_path / f"tables/{KEY}/hierarchy.json"
-    data = json.loads(hier_file.read_text(encoding="utf-8"))
-    # Introduce cycle: eq1 -> s1 -> eq1
-    data.append({"arxiv_id": PAPER, "version": 1, "element_id": f"{PREFIX}h1", "parent_id": f"{PREFIX}s1"})
-    atomic_json(hier_file, data)
-
-    res = run(make_record(), tmp_path, upstream=upstream)
-    assert res.status == "data_error"
-    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
-    assert report["valid"] is False
-    assert any(e["category"] == "tree" for e in report["errors"])
-
-
 def test_hierarchy_extra_columns_fail_schema(tmp_path):
     upstream = make_valid_dataset(tmp_path)
     hier_file = tmp_path / f"tables/{KEY}/hierarchy.json"
@@ -301,4 +410,3 @@ def test_safe_path_security_checks(tmp_path):
         safe_path(tmp_path, "../outside.json")
     with pytest.raises(ValueError, match="Absolute or parent"):
         safe_path(tmp_path, "C:/Windows/system.ini")
-
