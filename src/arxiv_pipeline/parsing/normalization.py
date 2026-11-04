@@ -113,7 +113,8 @@ _PLACEMENT_RE = re.compile(r"\\begin\{(?:figure|table)\*?\}\s*\[[a-zA-Z!]+\]", r
 # Layout & spacing commands to eliminate
 _LAYOUT_COMMANDS_RE = re.compile(
     r"\\(?:centering|raggedright|raggedleft|noindent|indent|newpage|clearpage|"
-    r"smallskip|medskip|bigskip|vfill|hfill)\b"
+    r"smallskip|medskip|bigskip|vfill|hfill|maketitle|tableofcontents|protect)\b"
+    r"(?:\s*\[[^\]]*\])?(?:\s*\{\})?"
 )
 
 # Explicit dimension spacing: \vspace*{...}, \hspace*{...}, \setlength{...}{...}
@@ -124,46 +125,119 @@ _TABLE_RULES_RE = re.compile(
     r"\\(?:toprule|midrule|bottomrule|hline)\b|\\(?:cline|cmidrule)\s*(?:\([^)]*\))?\s*\{[^{}]*\}"
 )
 
-# Font size modifiers
+# Font size modifiers and style switches
 _FONT_SIZES_RE = re.compile(
-    r"\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge)\b"
+    r"\\(?:tiny|scriptsize|footnotesize|small|normalsize|large|Large|LARGE|huge|Huge|"
+    r"bfseries|itshape|slshape|scshape|rmfamily|sffamily|ttfamily|normalfont)\b"
 )
+
+# Color declarations: \color{...}, \color[...]{...}, \pagecolor{...}, \normalcolor
+_COLOR_DECLARATIONS_RE = re.compile(
+    r"\\(?:color|pagecolor)\b(?:\s*\[[^\]]*\])?\s*\{[^{}]*\}|\\normalcolor\b"
+)
+
+# Color wrappers with content: \textcolor{...}{...}, \textcolor[...]{...}{...}, \colorbox, \fcolorbox
+_COLOR_WRAPPER_RE = re.compile(r"\\(textcolor|colorbox|fcolorbox)\b(?:\s*\[[^\]]*\])?")
 
 # Text formatting wrappers: \textbf{...}, \textit{...}, etc.
 _TEXT_STYLE_NAMES = (
     "textbf", "textit", "emph", "underline", "textsf", "texttt",
-    "textsc", "textmd", "textup", "textsl"
+    "textsc", "textmd", "textup", "textsl", "textrm", "textnormal"
 )
 _TEXT_STYLE_PATTERN = re.compile(r"\\(" + "|".join(_TEXT_STYLE_NAMES) + r")\s*\{")
 
 
+def _is_escaped(text: str, idx: int) -> bool:
+    """Return True if character at idx is escaped by an odd number of preceding backslashes."""
+    count = 0
+    i = idx - 1
+    while i >= 0 and text[i] == "\\":
+        count += 1
+        i -= 1
+    return count % 2 == 1
+
+
+def _extract_balanced_brace(text: str, start_pos: int) -> tuple[str, int] | None:
+    """Extract a balanced {...} group starting at start_pos.
+
+    Returns (inner_content, end_pos_after_closing_brace) or None if unbalanced/invalid.
+    """
+    text_len = len(text)
+    if start_pos >= text_len or text[start_pos] != "{":
+        return None
+
+    depth = 1
+    pos = start_pos + 1
+    while pos < text_len and depth > 0:
+        char = text[pos]
+        if char == "{" and not _is_escaped(text, pos):
+            depth += 1
+        elif char == "}" and not _is_escaped(text, pos):
+            depth -= 1
+        pos += 1
+
+    if depth == 0:
+        return text[start_pos + 1 : pos - 1], pos
+    return None
+
+
+def _strip_color_wrappers(text: str) -> str:
+    """Unwrap \\textcolor[model]{specs}{content} and \\colorbox{color}{content} -> content."""
+    start_search = 0
+    while True:
+        match = _COLOR_WRAPPER_RE.search(text, start_search)
+        if not match:
+            break
+
+        cmd = match.group(1)
+        expected_color_args = 2 if cmd == "fcolorbox" else 1
+
+        pos = match.end()
+        valid = True
+        for _ in range(expected_color_args):
+            while pos < len(text) and text[pos].isspace():
+                pos += 1
+            group = _extract_balanced_brace(text, pos)
+            if group is None:
+                valid = False
+                break
+            _, pos = group
+
+        if not valid:
+            start_search = match.start() + 1
+            continue
+
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        content_group = _extract_balanced_brace(text, pos)
+        if content_group is None:
+            start_search = match.start() + 1
+            continue
+
+        inner_content, end_pos = content_group
+        text = text[:match.start()] + inner_content + text[end_pos:]
+        start_search = match.start()
+
+    return text
+
+
 def _strip_text_styles(text: str) -> str:
     """Unwrap \\textbf{content} -> content, supporting nested styles."""
+    start_search = 0
     while True:
-        match = _TEXT_STYLE_PATTERN.search(text)
+        match = _TEXT_STYLE_PATTERN.search(text, start_search)
         if not match:
             break
         start_idx = match.start()
         brace_start = match.end() - 1
 
-        # Find matching closing brace
-        depth = 1
-        pos = brace_start + 1
-        text_len = len(text)
-        while pos < text_len and depth > 0:
-            char = text[pos]
-            if char == "{" and (pos == 0 or text[pos - 1] != "\\"):
-                depth += 1
-            elif char == "}" and (pos == 0 or text[pos - 1] != "\\"):
-                depth -= 1
-            pos += 1
-
-        if depth == 0:
-            inner_content = text[brace_start + 1:pos - 1]
-            text = text[:start_idx] + inner_content + text[pos:]
+        group = _extract_balanced_brace(text, brace_start)
+        if group is not None:
+            inner_content, end_pos = group
+            text = text[:start_idx] + inner_content + text[end_pos:]
+            start_search = start_idx
         else:
-            # Unbalanced brace; leave as is to prevent infinite loop
-            break
+            start_search = start_idx + 1
     return text
 
 
@@ -213,20 +287,27 @@ def clean_latex_formatting(text: str) -> str:
     # 6. Remove table rules
     text = _TABLE_RULES_RE.sub(" ", text)
 
-    # 7. Remove font size declarations
+    # 7. Remove font size declarations and style switches
     text = _FONT_SIZES_RE.sub(" ", text)
 
-    # 8. Unwrap text styles (\textbf{text} -> text)
-    text = _strip_text_styles(text)
+    # 8. Remove declarative color commands
+    text = _COLOR_DECLARATIONS_RE.sub(" ", text)
 
-    # 9. Replace LaTeX quotation styles outside math (safe: math is masked, f''(x) is protected)
+    # 9. Unwrap color wrappers and text styles (\textcolor, \textbf, etc.)
+    prev = None
+    while prev != text:
+        prev = text
+        text = _strip_color_wrappers(text)
+        text = _strip_text_styles(text)
+
+    # 10. Replace LaTeX quotation styles outside math (safe: math is masked, f''(x) is protected)
     text = re.sub(r"``|''", '"', text)
     text = re.sub(r"`|'", "'", text)
 
-    # 10. Replace non-breaking space (tie) with normal space
+    # 11. Replace non-breaking space (tie) with normal space
     text = re.sub(r"(?<!\\)~", " ", text)
 
-    # 11. Unescape common escaped symbols outside math
+    # 12. Unescape common escaped symbols outside math
     text = text.replace(r"\%", "%")
     text = text.replace(r"\&", "&")
     text = text.replace(r"\_", "_")
@@ -234,12 +315,11 @@ def clean_latex_formatting(text: str) -> str:
     text = text.replace(r"\{", "{")
     text = text.replace(r"\}", "}")
 
-    # Each token can only contain earlier tokens; one reverse pass restores all
-    # nesting. The source-absent prefix prevents interpreting literal text as tokens.
+    # 13. Restore protected math expressions in reverse order
     for i in range(len(math_tokens) - 1, -1, -1):
         text = text.replace(f"{math_prefix}{i}__", math_tokens[i])
 
-    # 13. Collapse multiple whitespaces and newlines
+    # 14. Collapse multiple whitespaces and newlines
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
