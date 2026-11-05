@@ -202,23 +202,15 @@ def run(
                       f"Manifest table path for '{t_name}' ({manifest_tables.get(t_name)}) != declared artifact ({dedup_artifacts.get(t_name)})")
 
     # Version list and status verification
-    manifest_versions = manifest.get("versions", [])
-    if not isinstance(manifest_versions, list):
-        issue("manifest", "invalid_versions_list", "Manifest versions must be a list")
-        manifest_versions = []
-    else:
-        actual_versions = []
-        for v_idx, v_info in enumerate(manifest_versions):
-            if not isinstance(v_info, dict):
-                issue("manifest", "malformed_version_info", f"Manifest version entry at index {v_idx} is not an object")
-                continue
-            v_num = v_info.get("version")
-            v_status = v_info.get("status")
-            actual_versions.append(v_num)
-            if v_status not in {"success", "no_source"}:
-                issue("manifest", "invalid_version_status", f"Version {v_num} status '{v_status}' not in {{'success', 'no_source'}}")
-        if actual_versions != expected_versions:
-            issue("manifest", "invalid_versions_list", f"Manifest versions {actual_versions} do not match expected {expected_versions}")
+    manifest_versions = manifest.get("versions")
+    if (
+        not isinstance(manifest_versions, list)
+        or any(not isinstance(v, dict) or type(v.get("version")) is not int for v in manifest_versions)
+        or [v["version"] for v in manifest_versions] != expected_versions
+        or any(v.get("status") not in {"success", "no_source"} for v in manifest_versions)
+    ):
+        issue("manifest", "invalid_versions_list", "Manifest versions must match expected_versions with valid status")
+        manifest_versions = manifest_versions if isinstance(manifest_versions, list) else []
 
     # Parse and deeply verify references.bib against bibtex.json
     bibtex_file_rel = dedup_artifacts["bibtex_file"]
@@ -236,7 +228,11 @@ def run(
                 else:
                     warnings.append(dict(bw, category="bib_warning", paper_id=paper_id))
 
-            if len(parsed_bib_entries) != len(bibtex):
+            if len(bibtex) == 0:
+                if parsed_bib_entries or bib_text.strip():
+                    issue("schema", "unexpected_content_in_empty_bib",
+                          "references.bib must be empty when bibtex table is empty")
+            elif len(parsed_bib_entries) != len(bibtex):
                 issue("schema", "bibtex_file_entry_count_mismatch",
                       f"references.bib parsed {len(parsed_bib_entries)} entries != bibtex.json {len(bibtex)} entries")
             else:
@@ -282,6 +278,8 @@ def run(
         issue("schema", "invalid_elements_table", "elements must be a JSON list")
         elements = []
 
+    prefix = paper_id.replace(".", "-").replace("/", "_") + "#"
+    EXPECTED_ELEMENT_KEYS = {"element_id", "arxiv_id", "kind", "content"}
     element_ids: set[str] = set()
     element_by_id: dict[str, dict[str, Any]] = {}
     content_kind_seen: set[tuple[str, str]] = set()
@@ -290,6 +288,9 @@ def run(
         if not isinstance(row, dict):
             issue("schema", "malformed_element_row", f"Element row {idx} is not an object")
             continue
+        if set(row.keys()) != EXPECTED_ELEMENT_KEYS:
+            issue("schema", "invalid_element_columns", f"Element row {idx} keys {set(row.keys())} != {EXPECTED_ELEMENT_KEYS}")
+
         eid = row.get("element_id")
         row_arxiv_id = row.get("arxiv_id")
         kind = row.get("kind")
@@ -323,6 +324,17 @@ def run(
                     issue("business", "duplicate_kind_content", f"Duplicate non-document (kind, content) for kind '{kind}': {content[:50]}...")
                 content_kind_seen.add(pair)
 
+    # Document elements must strictly match success versions (Issue 8)
+    expected_doc_elements = {
+        f"{prefix}root{v['version']}"
+        for v in manifest_versions
+        if isinstance(v, dict) and type(v.get("version")) is int and v.get("status") == "success"
+    }
+    actual_doc_elements = {r["element_id"] for r in elements if isinstance(r, dict) and r.get("kind") == "document"}
+    if actual_doc_elements != expected_doc_elements:
+        issue("business", "invalid_document_elements",
+              f"Document elements in elements table {sorted(actual_doc_elements)} != expected {sorted(expected_doc_elements)}")
+
     # 6. Schema Integrity for hierarchy table
     if not isinstance(hierarchy, list):
         issue("schema", "invalid_hierarchy_table", "hierarchy must be a JSON list")
@@ -355,17 +367,35 @@ def run(
             issue("schema", "empty_hierarchy_element_id", f"Hierarchy row {idx} element_id is empty")
         elif child_id not in element_ids:
             issue("reference", "foreign_key_missing_child", f"Hierarchy element_id '{child_id}' not found in elements")
+        elif element_by_id.get(child_id, {}).get("kind") == "document":
+            issue("tree", "document_as_hierarchy_child", f"Hierarchy row {idx} has document element '{child_id}' as child")
 
         if not isinstance(parent_id, str) or not parent_id.strip():
             issue("schema", "empty_hierarchy_parent_id", f"Hierarchy row {idx} parent_id is empty")
         elif parent_id not in element_ids:
             issue("reference", "foreign_key_missing_parent", f"Hierarchy parent_id '{parent_id}' not found in elements")
+        elif element_by_id.get(parent_id, {}).get("kind") == "document":
+            if type(h_ver) is int and parent_id != f"{prefix}root{h_ver}":
+                issue("tree", "invalid_document_parent",
+                      f"Hierarchy row {idx} for version {h_ver} has document parent '{parent_id}' which is not {prefix}root{h_ver}")
 
         if type(h_ver) is int:
             hierarchy_by_version.setdefault(h_ver, []).append(row)
 
     # 7. Deep Occurrences Tree Validation & Exact Multiset Correspondence with Hierarchy
-    prefix = paper_id.replace(".", "-").replace("/", "_") + "#"
+    manifest_vers_with_source = {
+        v["version"] for v in manifest_versions
+        if isinstance(v, dict) and type(v.get("version")) is int and v.get("status") == "success"
+    }
+
+    # Hierarchy cannot contain rows for versions that are not success in manifest (Issue 7)
+    for h_ver in sorted(hierarchy_by_version.keys()):
+        if h_ver not in manifest_vers_with_source:
+            issue("tree", "hierarchy_version_not_in_manifest_success",
+                  f"Hierarchy table contains rows for version {h_ver} which is not a success version in manifest")
+
+    total_occs_per_version: dict[int, int] = {}
+    all_occ_edges: list[tuple[int, str, str]] = []
 
     for v_info in manifest_versions if isinstance(manifest_versions, list) else []:
         v_num = v_info.get("version")
@@ -407,6 +437,7 @@ def run(
             issue("manifest", "empty_occurrences_for_success_version", f"Version {v_num} status is success but occurrences list is empty")
             continue
 
+        total_occs_per_version[v_num] = len(occs)
         occ_by_id: dict[str, dict[str, Any]] = {}
         children_by_parent: dict[str | None, list[dict[str, Any]]] = {}
         root_occs: list[dict[str, Any]] = []
@@ -427,10 +458,19 @@ def run(
             if elem_id not in element_ids:
                 issue("reference", "occurrence_missing_element", f"Occurrence {oid} references unknown element {elem_id}")
 
+            # Position must be strictly an int (reject bool True/False - Issue 10)
+            if type(pos) is not int or pos < 0:
+                issue("tree", "invalid_occurrence_position_type",
+                      f"Occurrence {oid} position {pos} is not a non-negative int")
+
             if p_oid is None:
                 root_occs.append(occ)
             else:
                 children_by_parent.setdefault(p_oid, []).append(occ)
+                # Non-root occurrence must not point to document element (Issue 8)
+                if element_by_id.get(elem_id, {}).get("kind") == "document":
+                    issue("tree", "document_as_child_occurrence",
+                          f"Version {v_num} child occurrence {oid} references document element {elem_id}")
 
         expected_root_elem = f"{prefix}root{v_num}"
         if len(root_occs) != 1:
@@ -459,9 +499,11 @@ def run(
                 visited.append(p_oid)
                 curr = occ_by_id[p_oid]
 
-        # Position continuity 0..k-1 per parent
+        # Position continuity 0..k-1 per parent (strictly int check - Issue 10)
         for p_oid, children in children_by_parent.items():
-            positions = [c.get("position") for c in children]
+            if any(type(c.get("position")) is not int for c in children):
+                issue("tree", "invalid_position_type", f"Version {v_num} parent {p_oid} child position is not int")
+            positions = [c.get("position") for c in children if type(c.get("position")) is int]
             if sorted(positions) != list(range(len(children))):
                 issue("tree", "non_continuous_occurrence_positions",
                       f"Version {v_num} parent {p_oid} children positions {positions} != expected 0..{len(children)-1}")
@@ -476,6 +518,7 @@ def run(
                 if child_elem and parent_elem:
                     occ_edges.append((v_num, child_elem, parent_elem))
 
+        all_occ_edges.extend(occ_edges)
         hier_edges = [(r["version"], r["element_id"], r["parent_id"]) for r in v_hier_rows]
 
         occ_counter = Counter(occ_edges)
@@ -488,28 +531,38 @@ def run(
                   f"Version {v_num} hierarchy rows do not match occurrence edges. "
                   f"Missing in hierarchy: {dict(missing_in_hier)}; Surplus in hierarchy: {dict(surplus_in_hier)}")
 
+    # Global multiset correspondence check across all versions (Issue 7)
+    all_hier_edges = [(r["version"], r["element_id"], r["parent_id"]) for r in hierarchy]
+    if Counter(all_occ_edges) != Counter(all_hier_edges):
+        missing_in_hier = Counter(all_occ_edges) - Counter(all_hier_edges)
+        surplus_in_hier = Counter(all_hier_edges) - Counter(all_occ_edges)
+        issue("tree", "hierarchy_occurrence_global_mismatch",
+              f"Global hierarchy rows do not match occurrence edges across all versions. "
+              f"Missing in hierarchy: {dict(missing_in_hier)}; Surplus in hierarchy: {dict(surplus_in_hier)}")
+
     # 8. Schema & Integrity for bibtex table
     if not isinstance(bibtex, list):
         issue("schema", "invalid_bibtex_table", "bibtex must be a JSON list")
         bibtex = []
 
     bibtex_keys: set[str] = set()
-    REQUIRED_BIB_FIELDS = ("arxiv_id", "citation_key", "entry_type", "title", "authors", "year")
+    EXPECTED_BIBTEX_KEYS = {"arxiv_id", "citation_key", "entry_type", "title", "authors", "year", "doi", "journal", "url"}
 
     for idx, row in enumerate(bibtex):
         if not isinstance(row, dict):
             issue("schema", "malformed_bibtex_row", f"BibTeX row {idx} is not an object")
             continue
-
-        for req in REQUIRED_BIB_FIELDS:
-            if req not in row:
-                issue("schema", "missing_bibtex_field", f"BibTeX row {idx} missing required field '{req}'")
+        if set(row.keys()) != EXPECTED_BIBTEX_KEYS:
+            issue("schema", "invalid_bibtex_columns", f"BibTeX row {idx} keys {set(row.keys())} != {EXPECTED_BIBTEX_KEYS}")
 
         b_arxiv_id = row.get("arxiv_id")
         ckey = row.get("citation_key")
         etype = row.get("entry_type")
         authors = row.get("authors")
         year = row.get("year")
+        doi = row.get("doi")
+        journal = row.get("journal")
+        url = row.get("url")
 
         if b_arxiv_id != paper_id:
             issue("schema", "mismatched_bibtex_arxiv_id", f"BibTeX row {idx} arxiv_id {b_arxiv_id} != {paper_id}")
@@ -529,6 +582,11 @@ def run(
 
         if year is not None and type(year) is not int:
             issue("schema", "invalid_year_type", f"BibTeX key {ckey} year must be int or None, got {type(year)}")
+
+        for str_opt in ("doi", "journal", "url"):
+            val = row.get(str_opt)
+            if val is not None and not isinstance(val, str):
+                issue("schema", f"invalid_{str_opt}_type", f"BibTeX row {idx} field '{str_opt}' must be str or None, got {type(val).__name__}")
 
     # 9. Citation Key Synchronization Check
     all_cited_keys: set[str] = set()
@@ -555,14 +613,37 @@ def run(
                   f"Citations {sorted(unaccounted)} in text not found in bibtex or declared unknown in warnings",
                   warning=True)
 
-    # 10. Deduplication Counts Verification
+    # 10. Deduplication Counts Verification (Issue 9)
     manifest_counts = manifest.get("counts", {})
-    if manifest_counts.get("elements_after") != len(elements):
+    elements_before = manifest_counts.get("elements_before")
+    elements_after = manifest_counts.get("elements_after")
+    bibtex_before = manifest_counts.get("bibtex_before")
+    bibtex_after = manifest_counts.get("bibtex_after")
+
+    total_occurrences = sum(total_occs_per_version.values())
+
+    if type(elements_after) is not int or elements_after != len(elements):
         issue("manifest", "mismatched_element_counts",
-              f"Manifest elements_after {manifest_counts.get('elements_after')} != len(elements) {len(elements)}")
-    if manifest_counts.get("bibtex_after") != len(bibtex):
+              f"Manifest elements_after {elements_after} != len(elements) {len(elements)}")
+
+    if type(bibtex_after) is not int or bibtex_after != len(bibtex):
         issue("manifest", "mismatched_bibtex_counts",
-              f"Manifest bibtex_after {manifest_counts.get('bibtex_after')} != len(bibtex) {len(bibtex)}")
+              f"Manifest bibtex_after {bibtex_after} != len(bibtex) {len(bibtex)}")
+
+    if type(elements_before) is not int or elements_before < 0:
+        issue("manifest", "invalid_elements_before", "Manifest elements_before must be non-negative int")
+    elif type(elements_after) is int and elements_before < elements_after:
+        issue("manifest", "elements_before_less_than_after",
+              f"Manifest elements_before ({elements_before}) < elements_after ({elements_after})")
+    elif elements_before != total_occurrences:
+        issue("manifest", "mismatched_elements_before",
+              f"Manifest elements_before ({elements_before}) != total occurrences ({total_occurrences})")
+
+    if type(bibtex_before) is not int or bibtex_before < 0:
+        issue("manifest", "invalid_bibtex_before", "Manifest bibtex_before must be non-negative int")
+    elif type(bibtex_after) is int and bibtex_before < bibtex_after:
+        issue("manifest", "bibtex_before_less_than_after",
+              f"Manifest bibtex_before ({bibtex_before}) < bibtex_after ({bibtex_after})")
 
     # Forward any upstream warnings
     for w in manifest.get("warnings", []):

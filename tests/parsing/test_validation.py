@@ -115,7 +115,7 @@ def make_valid_dataset(tmp_path: Path):
             "bibtex_file": f"tables/{KEY}/references.bib",
         },
         "counts": {
-            "elements_before": 6,
+            "elements_before": 7,
             "elements_after": len(elements),
             "bibtex_before": 2,
             "bibtex_after": len(bibtex),
@@ -245,7 +245,7 @@ def test_manifest_version_identity_and_status(tmp_path):
     res = run(make_record(), tmp_path, upstream=upstream)
     assert res.status == "data_error"
     report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
-    assert any(e["code"] == "invalid_version_status" for e in report["errors"])
+    assert any(e["code"] in ("invalid_versions_list", "invalid_version_status") for e in report["errors"])
 
 
 def test_references_bib_deep_parsing_and_match(tmp_path):
@@ -464,3 +464,158 @@ def test_safe_path_security_checks(tmp_path):
         safe_path(tmp_path, "../outside.json")
     with pytest.raises(ValueError, match="Absolute or parent"):
         safe_path(tmp_path, "C:/Windows/system.ini")
+
+
+def test_issue6_bibtex_file_missing_declaration_and_empty_bibtex_with_garbage(tmp_path):
+    # Case 1: bibtex_file not declared
+    upstream = make_valid_dataset(tmp_path)
+    del upstream["stages"]["deduplicate"]["artifacts"]["bibtex_file"]
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "missing_artifact_declaration" for e in report["errors"])
+
+    # Case 2: bibtex.json empty but references.bib has garbage
+    tmp_path2 = tmp_path / "sub2"
+    upstream2 = make_valid_dataset(tmp_path2)
+    atomic_json(tmp_path2 / f"tables/{KEY}/bibtex.json", [])
+    (tmp_path2 / f"tables/{KEY}/references.bib").write_text("@article{extra, title={Ghost}}\n", encoding="utf-8")
+    man_path = tmp_path2 / f"tables/{KEY}/parsing_manifest.json"
+    man = json.loads(man_path.read_text(encoding="utf-8"))
+    man["counts"]["bibtex_after"] = 0
+    atomic_json(man_path, man)
+
+    res2 = run(make_record(), tmp_path2, upstream=upstream2)
+    assert res2.status == "data_error"
+    report2 = json.loads((tmp_path2 / res2.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] in ("unexpected_content_in_empty_bib", "bibtex_file_entry_count_mismatch") for e in report2["errors"])
+
+
+def test_issue7_hierarchy_orphan_rows_from_missing_or_no_source_version(tmp_path):
+    upstream = make_valid_dataset(tmp_path)
+    hier_file = tmp_path / f"tables/{KEY}/hierarchy.json"
+    hier = json.loads(hier_file.read_text(encoding="utf-8"))
+    # Add a row belonging to version 99 which is not in manifest versions
+    hier.append({"arxiv_id": PAPER, "version": 99, "element_id": f"{PREFIX}s1", "parent_id": f"{PREFIX}h1"})
+    atomic_json(hier_file, hier)
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] in ("hierarchy_version_not_in_manifest_success", "unexpected_hierarchy_version", "hierarchy_occurrence_global_mismatch") for e in report["errors"])
+
+
+def test_issue8_document_element_rules(tmp_path):
+    # Case 1: Extra document element in elements.json
+    upstream = make_valid_dataset(tmp_path)
+    elems_file = tmp_path / f"tables/{KEY}/elements.json"
+    elems = json.loads(elems_file.read_text(encoding="utf-8"))
+    elems.append({"element_id": f"{PREFIX}fake_root", "arxiv_id": PAPER, "kind": "document", "content": "Fake root"})
+    atomic_json(elems_file, elems)
+
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "invalid_document_elements" for e in report["errors"])
+
+    # Case 2: Document element used as child occurrence
+    tmp_path2 = tmp_path / "sub2"
+    upstream2 = make_valid_dataset(tmp_path2)
+    v1_occs_file = tmp_path2 / f"parsed/{KEY}/v1/occurrences.json"
+    v1_data = json.loads(v1_occs_file.read_text(encoding="utf-8"))
+    # Point a child occurrence to document element
+    v1_data["occurrences"][1]["element_id"] = f"{PREFIX}root1"
+    atomic_json(v1_occs_file, v1_data)
+
+    res2 = run(make_record(), tmp_path2, upstream=upstream2)
+    assert res2.status == "data_error"
+    report2 = json.loads((tmp_path2 / res2.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] in ("document_as_child_occurrence", "document_as_hierarchy_child", "hierarchy_occurrence_mismatch") for e in report2["errors"])
+
+
+def test_issue9_dedup_counts_validation(tmp_path):
+    upstream = make_valid_dataset(tmp_path)
+    man_path = tmp_path / f"tables/{KEY}/parsing_manifest.json"
+    man = json.loads(man_path.read_text(encoding="utf-8"))
+
+    # Case 1: elements_before < elements_after
+    bad_man1 = deepcopy(man)
+    bad_man1["counts"]["elements_before"] = 2  # less than elements_after (5)
+    atomic_json(man_path, bad_man1)
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] in ("elements_before_less_than_after", "mismatched_elements_before") for e in report["errors"])
+
+    # Case 2: elements_before != total occurrences
+    bad_man2 = deepcopy(man)
+    bad_man2["counts"]["elements_before"] = 999  # does not match total occurrences (7)
+    atomic_json(man_path, bad_man2)
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "mismatched_elements_before" for e in report["errors"])
+
+    # Case 3: bibtex_before < bibtex_after
+    bad_man3 = deepcopy(man)
+    bad_man3["counts"]["bibtex_before"] = 0  # less than bibtex_after (1)
+    atomic_json(man_path, bad_man3)
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "bibtex_before_less_than_after" for e in report["errors"])
+
+
+def test_issue10_schema_strictness(tmp_path):
+    # Case 1: elements.json has extra column
+    upstream = make_valid_dataset(tmp_path)
+    elems_file = tmp_path / f"tables/{KEY}/elements.json"
+    elems = json.loads(elems_file.read_text(encoding="utf-8"))
+    elems[0]["unexpected_field"] = "bad"
+    atomic_json(elems_file, elems)
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "invalid_element_columns" for e in report["errors"])
+
+    # Case 2: bibtex.json missing required column (e.g. journal)
+    tmp_path2 = tmp_path / "sub2"
+    upstream2 = make_valid_dataset(tmp_path2)
+    bib_file = tmp_path2 / f"tables/{KEY}/bibtex.json"
+    bib = json.loads(bib_file.read_text(encoding="utf-8"))
+    del bib[0]["journal"]
+    atomic_json(bib_file, bib)
+    res2 = run(make_record(), tmp_path2, upstream=upstream2)
+    assert res2.status == "data_error"
+    report2 = json.loads((tmp_path2 / res2.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "invalid_bibtex_columns" for e in report2["errors"])
+
+    # Case 3: occurrence position is bool (True) instead of int
+    tmp_path3 = tmp_path / "sub3"
+    upstream3 = make_valid_dataset(tmp_path3)
+    v1_occs_file = tmp_path3 / f"parsed/{KEY}/v1/occurrences.json"
+    v1_data = json.loads(v1_occs_file.read_text(encoding="utf-8"))
+    v1_data["occurrences"][1]["position"] = True  # bool is subclass of int!
+    atomic_json(v1_occs_file, v1_data)
+    res3 = run(make_record(), tmp_path3, upstream=upstream3)
+    assert res3.status == "data_error"
+    report3 = json.loads((tmp_path3 / res3.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] in ("invalid_occurrence_position_type", "invalid_position_type") for e in report3["errors"])
+
+
+def test_issue11_benchmark_zero_handling(tmp_path):
+    from arxiv_pipeline.export.benchmark import generate_parsing_summary
+    out = tmp_path / "out"
+    (out / "manifests").mkdir(parents=True)
+    (out / "manifests/parsing.json").write_text("[]", encoding="utf-8")
+
+    summary = generate_parsing_summary(out, wall_time_sec=0.0, peak_ram_mb=0.0, avg_ram_mb=0.0, total_assigned=0)
+    cov = summary["coverage_statistics"]
+    assert cov["total_assigned_publications"] == 0
+    assert cov["successfully_parsed_publications"] == 0
+    assert cov["parsing_success_rate_pct"] == 0.0
+    assert cov["total_versions_discovered"] == 0
+    assert cov["parsed_versions_count"] == 0
+    assert cov["empty_versions_count"] == 0
+
+

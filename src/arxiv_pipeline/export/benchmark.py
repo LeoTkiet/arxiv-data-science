@@ -128,14 +128,17 @@ def calculate_storage_mb(directory: Path | str) -> float:
     return round(total_bytes / (1024 * 1024), 2)
 
 
-def count_renamed_citations_for_paper(output_dir: Path, key: str, expected_versions: list[int] | None = None) -> int:
+def count_renamed_citations_for_paper(output_dir: Path | str, key: str, expected_versions: set[int] | list[int] | None = None) -> int:
     """Calculate how many citations were actually rewritten during deduplication."""
     from arxiv_pipeline.parsing.deduplication import unionize_bibtex
 
-    state_bib = output_dir / f"state/stages/bibliography/{key}"
-    state_norm = output_dir / f"state/stages/normalize/{key}"
+    out = Path(output_dir).resolve()
+    state_bib = out / f"state/stages/bibliography/{key}"
+    state_norm = out / f"state/stages/normalize/{key}"
     if not state_bib.exists() or not state_norm.exists():
         return 0
+
+    exp_set = set(expected_versions) if expected_versions is not None else None
 
     bib_entries = []
     for bib_file in sorted(state_bib.glob("*.json")):
@@ -144,11 +147,11 @@ def count_renamed_citations_for_paper(output_dir: Path, key: str, expected_versi
         try:
             doc = json.loads(bib_file.read_text(encoding="utf-8"))
             v_num = doc.get("version")
-            if expected_versions is not None and v_num not in expected_versions:
+            if exp_set is not None and v_num not in exp_set:
                 continue
             raw_art = doc.get("artifacts", {}).get("raw_bibtex")
-            if raw_art and (output_dir / raw_art).exists():
-                raw_doc = json.loads((output_dir / raw_art).read_text(encoding="utf-8"))
+            if raw_art and (out / raw_art).exists():
+                raw_doc = json.loads((out / raw_art).read_text(encoding="utf-8"))
                 bib_entries.append((v_num, raw_doc.get("entries", [])))
         except Exception:
             pass
@@ -167,11 +170,11 @@ def count_renamed_citations_for_paper(output_dir: Path, key: str, expected_versi
         try:
             doc = json.loads(norm_file.read_text(encoding="utf-8"))
             v_num = doc.get("version")
-            if expected_versions is not None and v_num not in expected_versions:
+            if exp_set is not None and v_num not in exp_set:
                 continue
             art = doc.get("artifacts", {}).get("normalized_tree")
-            if art and (output_dir / art).exists():
-                tree_doc = json.loads((output_dir / art).read_text(encoding="utf-8"))
+            if art and (out / art).exists():
+                tree_doc = json.loads((out / art).read_text(encoding="utf-8"))
                 for node in tree_doc.get("nodes", []):
                     text = node.get("cleaned_content", "")
                     for match in _CITE_RE.finditer(text):
@@ -205,14 +208,14 @@ def generate_parsing_summary(
         except Exception:
             pass
 
-    total_assigned = total_assigned or len(paper_outcomes) or 1
+    assigned_count = total_assigned if total_assigned is not None else len(paper_outcomes)
     successful_papers = [p for p in paper_outcomes if p.get("complete") and p.get("status") == "success"]
     empty_papers = [p for p in paper_outcomes if p.get("complete") and p.get("status") == "no_source"]
     success_count = len(successful_papers)
     empty_count = len(empty_papers)
 
     # Strictly compute success rate on successfully parsed publications (with source)
-    success_rate_pct = round((success_count / total_assigned) * 100, 2) if total_assigned else 0.0
+    success_rate_pct = round((success_count / assigned_count) * 100, 2) if assigned_count > 0 else 0.0
 
     total_versions = sum(len(p.get("expected_versions", [])) for p in paper_outcomes)
     parsed_versions = sum(
@@ -253,7 +256,7 @@ def generate_parsing_summary(
                     chk_snap = chk_doc.get("context", {}).get("input_snapshot_id")
                 if chk_snap and p_doc.get("input_snapshot_id") != chk_snap:
                     continue
-            valid_scoped_papers.append((p, p_doc, p_dir))
+            valid_scoped_papers.append((p, p_doc, p_dir, k))
             scoped_tables_dirs.append(p_dir)
         except Exception:
             continue
@@ -264,15 +267,15 @@ def generate_parsing_summary(
     bibtex_after = 0
     citations_renamed = 0
 
-    for p, p_doc, p_dir in valid_scoped_papers:
+    for p, p_doc, p_dir, k in valid_scoped_papers:
         counts = p_doc.get("counts", {})
         elements_before += counts.get("elements_before", 0)
         elements_after += counts.get("elements_after", 0)
         bibtex_before += counts.get("bibtex_before", 0)
         bibtex_after += counts.get("bibtex_after", 0)
 
-        exp_vers = p.get("expected_versions")
-        citations_renamed += count_renamed_citations_for_paper(output, p_dir.name, expected_versions=exp_vers)
+        exp_vers = set(p.get("expected_versions", []))
+        citations_renamed += count_renamed_citations_for_paper(output, k, expected_versions=exp_vers)
 
     elem_reduction_pct = (
         round(((elements_before - elements_after) / elements_before) * 100, 2)
@@ -283,19 +286,19 @@ def generate_parsing_summary(
         if bibtex_before > bibtex_after else 0.0
     )
 
-    avg_time_per_pub = round(wall_time_sec / total_assigned, 4) if total_assigned else round(wall_time_sec, 4)
+    avg_time_per_pub = round(wall_time_sec / assigned_count, 4) if assigned_count > 0 else round(wall_time_sec, 4)
     storage_mb = round(sum(calculate_storage_mb(d) for d in scoped_tables_dirs), 2)
 
     return {
         "environment": get_environment_info(environment_label),
         "coverage_statistics": {
-            "total_assigned_publications": total_assigned,
+            "total_assigned_publications": assigned_count,
             "successfully_parsed_publications": success_count,
             "pdf_only_empty_publications": empty_count,
             "parsing_success_rate_pct": success_rate_pct,
-            "total_versions_discovered": total_versions or total_assigned,
-            "parsed_versions_count": parsed_versions or success_count,
-            "empty_versions_count": empty_versions or empty_count,
+            "total_versions_discovered": total_versions,
+            "parsed_versions_count": parsed_versions,
+            "empty_versions_count": empty_versions,
         },
         "deduplication_statistics": {
             "elements_before_dedup": elements_before,
