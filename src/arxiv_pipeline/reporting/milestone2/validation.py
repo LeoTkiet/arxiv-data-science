@@ -2,11 +2,13 @@
 
 Enforces:
 1. Schema integrity across elements, hierarchy, bibtex tables, references.bib, occurrences, and parsing_manifest.
-2. Exact snapshot match (manifest.input_snapshot_id == context.input_snapshot_id).
+2. Exact snapshot match (both context.input_snapshot_id and manifest.input_snapshot_id must be non-empty and equal).
 3. No fallback default paths when artifacts are not explicitly declared by upstream deduplication.
-4. Occurrence tree validity (unique ID, valid root, position continuity 0..k-1, cycle-free DAG).
-5. Exact multiset equivalence between occurrences edges and hierarchy rows (supporting deduplicated repeated elements).
-6. Business rules: no 'References'/'Bibliography' headings, unique (kind, content) across non-document elements, and citation synchronization.
+4. Manifest version identity & status verification ([v["version"] ...] == expected_versions, status in {"success", "no_source"}).
+5. Full parsing and 1-to-1 verification of references.bib against bibtex.json.
+6. Occurrence tree validity (unique ID, valid root, position continuity 0..k-1, cycle-free DAG).
+7. Exact multiset equivalence between occurrences edges and hierarchy rows (supporting deduplicated repeated elements).
+8. Business rules: no 'References'/'Bibliography' headings, unique (kind, content) across non-document elements, and citation synchronization.
 """
 from __future__ import annotations
 
@@ -22,6 +24,8 @@ from arxiv_pipeline.common.schemas import (
     StageResult,
 )
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
+from arxiv_pipeline.parsing.bibliography import parse_bib_text
+from arxiv_pipeline.parsing.deduplication import normalize_doi, normalize_title
 
 VALID_KINDS = {
     "document",
@@ -111,7 +115,7 @@ def run(
         return result("data_error", ErrorInfo("missing_artifacts_map", "Deduplicate stage did not provide artifacts map"))
 
     # 2. Strict artifact declaration check: NEVER fall back to unauthenticated default paths
-    REQUIRED_DEDUP_ARTIFACTS = ("elements", "hierarchy", "bibtex", "parsing_manifest")
+    REQUIRED_DEDUP_ARTIFACTS = ("elements", "hierarchy", "bibtex", "bibtex_file", "parsing_manifest")
     for req in REQUIRED_DEDUP_ARTIFACTS:
         if req not in dedup_artifacts or not dedup_artifacts[req]:
             issue("manifest", "missing_artifact_declaration", f"Deduplicate stage did not declare artifact '{req}'")
@@ -165,12 +169,15 @@ def run(
         atomic_json(safe_path(output, rel_report), report_data)
         return result("data_error", ErrorInfo("read_failure", "; ".join(e["message"] for e in errors)))
 
-    # 3. Snapshot verification: manifest.input_snapshot_id MUST match context.input_snapshot_id
-    if input_snapshot_id is not None:
-        manifest_snapshot = manifest.get("input_snapshot_id")
-        if manifest_snapshot != input_snapshot_id:
-            issue("manifest", "snapshot_mismatch",
-                  f"Manifest input_snapshot_id '{manifest_snapshot}' does not match current snapshot '{input_snapshot_id}'")
+    # 3. Snapshot verification: both context and manifest must provide non-empty snapshot_id and match
+    manifest_snapshot = manifest.get("input_snapshot_id")
+    if not isinstance(input_snapshot_id, str) or not input_snapshot_id.strip():
+        issue("manifest", "missing_snapshot_id", "Upstream context missing or empty input_snapshot_id")
+    elif not isinstance(manifest_snapshot, str) or not manifest_snapshot.strip():
+        issue("manifest", "missing_snapshot_id", "Manifest missing or empty input_snapshot_id")
+    elif manifest_snapshot != input_snapshot_id:
+        issue("manifest", "snapshot_mismatch",
+              f"Manifest input_snapshot_id '{manifest_snapshot}' does not match current snapshot '{input_snapshot_id}'")
 
     # 4. Parsing manifest verification
     expected_versions = [v["version"] for v in record.get("versions", [])]
@@ -183,19 +190,92 @@ def run(
     if manifest.get("expected_versions") != expected_versions:
         issue("manifest", "mismatched_versions", f"Manifest expected_versions {manifest.get('expected_versions')} != {expected_versions}")
 
-    manifest_versions = manifest.get("versions", [])
-    if not isinstance(manifest_versions, list) or len(manifest_versions) != len(expected_versions):
-        issue("manifest", "invalid_versions_list", "Manifest versions list does not match expected count")
+    # Check manifest.tables declarations
+    manifest_tables = manifest.get("tables", {})
+    REQUIRED_TABLES = ("elements", "hierarchy", "bibtex", "bibtex_file")
+    if not isinstance(manifest_tables, dict):
+        issue("manifest", "invalid_manifest_tables", "Manifest tables mapping is missing or not a dict")
+    else:
+        for t_name in REQUIRED_TABLES:
+            if manifest_tables.get(t_name) != dedup_artifacts.get(t_name):
+                issue("manifest", "manifest_table_path_mismatch",
+                      f"Manifest table path for '{t_name}' ({manifest_tables.get(t_name)}) != declared artifact ({dedup_artifacts.get(t_name)})")
 
-    # references.bib check
-    bibtex_file_rel = dedup_artifacts.get("bibtex_file")
-    if bibtex_file_rel:
-        try:
-            bib_path = safe_path(output, bibtex_file_rel)
-            if len(bibtex) > 0 and (not bib_path.exists() or bib_path.stat().st_size == 0):
-                issue("schema", "empty_bibtex_file", "BibTeX table has entries but references.bib is missing or empty")
-        except Exception as exc:
-            issue("schema", "invalid_bibtex_file_path", str(exc))
+    # Version list and status verification
+    manifest_versions = manifest.get("versions", [])
+    if not isinstance(manifest_versions, list):
+        issue("manifest", "invalid_versions_list", "Manifest versions must be a list")
+        manifest_versions = []
+    else:
+        actual_versions = []
+        for v_idx, v_info in enumerate(manifest_versions):
+            if not isinstance(v_info, dict):
+                issue("manifest", "malformed_version_info", f"Manifest version entry at index {v_idx} is not an object")
+                continue
+            v_num = v_info.get("version")
+            v_status = v_info.get("status")
+            actual_versions.append(v_num)
+            if v_status not in {"success", "no_source"}:
+                issue("manifest", "invalid_version_status", f"Version {v_num} status '{v_status}' not in {{'success', 'no_source'}}")
+        if actual_versions != expected_versions:
+            issue("manifest", "invalid_versions_list", f"Manifest versions {actual_versions} do not match expected {expected_versions}")
+
+    # Parse and deeply verify references.bib against bibtex.json
+    bibtex_file_rel = dedup_artifacts["bibtex_file"]
+    try:
+        bib_path = safe_path(output, bibtex_file_rel)
+        if not bib_path.exists():
+            issue("schema", "missing_bibtex_file", f"Declared references.bib file does not exist: {bibtex_file_rel}")
+        else:
+            bib_text = bib_path.read_text(encoding="utf-8")
+            parsed_bib_entries, bib_warnings = parse_bib_text(bib_text)
+            for bw in bib_warnings:
+                code = bw.get("code")
+                if code in ("bib_entries_unparsed", "bib_entry_without_key"):
+                    issue("schema", code, bw.get("message", "BibTeX parse error in references.bib"))
+                else:
+                    warnings.append(dict(bw, category="bib_warning", paper_id=paper_id))
+
+            if len(parsed_bib_entries) != len(bibtex):
+                issue("schema", "bibtex_file_entry_count_mismatch",
+                      f"references.bib parsed {len(parsed_bib_entries)} entries != bibtex.json {len(bibtex)} entries")
+            else:
+                parsed_by_key = {}
+                for p_entry in parsed_bib_entries:
+                    k = p_entry.get("citation_key")
+                    if k in parsed_by_key:
+                        issue("schema", "duplicate_citation_key_in_bib_file", f"Duplicate citation key in references.bib: {k}")
+                    parsed_by_key[k] = p_entry
+
+                for brow in bibtex:
+                    bkey = brow.get("citation_key")
+                    if bkey not in parsed_by_key:
+                        issue("schema", "bibtex_file_missing_key", f"citation_key '{bkey}' from bibtex.json not found in references.bib")
+                        continue
+                    p_entry = parsed_by_key[bkey]
+                    if brow.get("entry_type", "").lower() != p_entry.get("entry_type", "").lower():
+                        issue("schema", "bibtex_field_mismatch",
+                              f"Key '{bkey}' entry_type mismatch: bibtex.json '{brow.get('entry_type')}' != references.bib '{p_entry.get('entry_type')}'")
+                    if brow.get("year") != p_entry.get("year"):
+                        issue("schema", "bibtex_field_mismatch",
+                              f"Key '{bkey}' year mismatch: bibtex.json {brow.get('year')} != references.bib {p_entry.get('year')}")
+                    if [a.strip().lower() for a in brow.get("authors", [])] != [a.strip().lower() for a in p_entry.get("authors", [])]:
+                        issue("schema", "bibtex_field_mismatch",
+                              f"Key '{bkey}' authors mismatch: bibtex.json {brow.get('authors')} != references.bib {p_entry.get('authors')}")
+                    if normalize_title(brow.get("title", "")) != normalize_title(p_entry.get("title", "")):
+                        issue("schema", "bibtex_field_mismatch",
+                              f"Key '{bkey}' title mismatch: bibtex.json '{brow.get('title')}' != references.bib '{p_entry.get('title')}'")
+                    for opt_field in ("doi", "journal", "url"):
+                        v_json = (brow.get(opt_field) or "").strip()
+                        v_bib = (p_entry.get(opt_field) or "").strip()
+                        if opt_field == "doi":
+                            if normalize_doi(v_json) != normalize_doi(v_bib):
+                                issue("schema", "bibtex_field_mismatch", f"Key '{bkey}' doi mismatch: '{v_json}' != '{v_bib}'")
+                        else:
+                            if v_json.lower() != v_bib.lower():
+                                issue("schema", "bibtex_field_mismatch", f"Key '{bkey}' {opt_field} mismatch: '{v_json}' != '{v_bib}'")
+    except Exception as exc:
+        issue("schema", "invalid_bibtex_file", str(exc))
 
     # 5. Schema Integrity for elements table
     if not isinstance(elements, list):
@@ -232,13 +312,11 @@ def run(
         if not isinstance(content, str):
             issue("schema", "non_string_content", f"Element {eid} content is not a string")
         else:
-            # Business rule: heading cannot be 'References' or 'Bibliography'
             if kind == "heading":
                 norm_h = content.strip().lower()
                 if norm_h in FORBIDDEN_HEADINGS:
                     issue("business", "forbidden_heading", f"Heading element {eid} has forbidden title '{content}'")
 
-            # Business rule: (kind, content) uniqueness across paper for non-document rows
             if kind != "document":
                 pair = (kind, content)
                 if pair in content_kind_seen:
@@ -283,9 +361,6 @@ def run(
         elif parent_id not in element_ids:
             issue("reference", "foreign_key_missing_parent", f"Hierarchy parent_id '{parent_id}' not found in elements")
 
-        if child_id == parent_id:
-            issue("tree", "self_loop", f"Hierarchy row {idx} contains self-loop: {child_id} == {parent_id}")
-
         if type(h_ver) is int:
             hierarchy_by_version.setdefault(h_ver, []).append(row)
 
@@ -328,12 +403,10 @@ def run(
                 issue("tree", "no_source_has_hierarchy", f"Version {v_num} is no_source but has hierarchy rows")
             continue
 
-        # Version has TeX source (status == "success")
         if not occs:
             issue("manifest", "empty_occurrences_for_success_version", f"Version {v_num} status is success but occurrences list is empty")
             continue
 
-        # Verify occurrence properties
         occ_by_id: dict[str, dict[str, Any]] = {}
         children_by_parent: dict[str | None, list[dict[str, Any]]] = {}
         root_occs: list[dict[str, Any]] = []
@@ -359,7 +432,6 @@ def run(
             else:
                 children_by_parent.setdefault(p_oid, []).append(occ)
 
-        # Single root occurrence for version
         expected_root_elem = f"{prefix}root{v_num}"
         if len(root_occs) != 1:
             issue("tree", "multiple_root_occurrences", f"Version {v_num} must have exactly 1 root occurrence (parent=None), found {len(root_occs)}")
@@ -395,7 +467,6 @@ def run(
                       f"Version {v_num} parent {p_oid} children positions {positions} != expected 0..{len(children)-1}")
 
         # Exact Multiset Correspondence: occurrences edges vs hierarchy rows
-        # For each non-root occurrence: child_elem = occ['element_id'], parent_elem = parent_occ['element_id']
         occ_edges = []
         for occ in occs:
             p_oid = occ.get("parent_occurrence_id")

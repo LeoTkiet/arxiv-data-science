@@ -9,6 +9,7 @@ import pytest
 
 from arxiv_pipeline.common.schemas import PARSING_SCHEMA_VERSION, VersionRecord
 from arxiv_pipeline.common.utils import atomic_json, paper_key
+from arxiv_pipeline.parsing.deduplication import render_bibtex
 from arxiv_pipeline.reporting.milestone2.validation import (
     run,
     safe_path,
@@ -64,10 +65,12 @@ def make_valid_dataset(tmp_path: Path):
             "authors": ["A. Vaswani"],
             "year": 2017,
             "doi": "10.5555/3295222.3295349",
+            "journal": "NeurIPS",
+            "url": "https://arxiv.org/abs/1706.03762",
         }
     ]
 
-    references_bib = "@article{vaswani2017,\n  title={Attention is all you need},\n  year={2017}\n}\n"
+    references_bib = render_bibtex(bibtex)
 
     # Write occurrences
     for v in (1, 2):
@@ -164,9 +167,9 @@ def test_valid_dataset_passes_validation(tmp_path):
 
 
 def test_repeated_element_multiple_occurrences_is_valid(tmp_path):
-    """Crucial test for Issue 1: repeated occurrences of element s1 under h1 produces
+    """Repeated occurrences of element s1 under h1 produces duplicate (s1, h1) rows in hierarchy,
 
-    duplicate (s1, h1) rows in hierarchy, which is valid and must NOT trigger multiple_parents error.
+    which is valid and must NOT trigger multiple_parents error.
     """
     upstream = make_valid_dataset(tmp_path)
 
@@ -199,22 +202,76 @@ def test_repeated_element_multiple_occurrences_is_valid(tmp_path):
     assert report["checks"]["tree_validity"] is True
 
 
-def test_snapshot_mismatch_fails_validation(tmp_path):
-    """Issue 4 test: manifest.input_snapshot_id must match context.input_snapshot_id."""
+def test_snapshot_mismatch_and_missing_fails_validation(tmp_path):
+    """Item 3 test: both upstream context and manifest must have matching non-empty input_snapshot_id."""
     upstream = make_valid_dataset(tmp_path)
-    upstream["context"]["input_snapshot_id"] = "changed-snapshot-456"
 
+    # 1. Mismatch
+    bad_up = deepcopy(upstream)
+    bad_up["context"]["input_snapshot_id"] = "changed-snapshot-456"
+    res = run(make_record(), tmp_path, upstream=bad_up)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "snapshot_mismatch" for e in report["errors"])
+
+    # 2. Missing in context
+    bad_up2 = deepcopy(upstream)
+    bad_up2["context"]["input_snapshot_id"] = ""
+    res = run(make_record(), tmp_path, upstream=bad_up2)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "missing_snapshot_id" for e in report["errors"])
+
+
+def test_manifest_version_identity_and_status(tmp_path):
+    """Item 2 test: versions list in manifest must match expected_versions and have valid status."""
+    upstream = make_valid_dataset(tmp_path)
+    man_path = tmp_path / f"tables/{KEY}/parsing_manifest.json"
+    man_doc = json.loads(man_path.read_text(encoding="utf-8"))
+
+    # Case A: Duplicate version in manifest list: [v1, v1] instead of [v1, v2]
+    bad_man = deepcopy(man_doc)
+    bad_man["versions"] = [bad_man["versions"][0], bad_man["versions"][0]]
+    atomic_json(man_path, bad_man)
     res = run(make_record(), tmp_path, upstream=upstream)
     assert res.status == "data_error"
     report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
-    assert report["valid"] is False
-    assert any(e["code"] == "snapshot_mismatch" for e in report["errors"])
+    assert any(e["code"] == "invalid_versions_list" for e in report["errors"])
+
+    # Case B: Invalid version status: "failed" instead of "success" or "no_source"
+    bad_man2 = deepcopy(man_doc)
+    bad_man2["versions"][0]["status"] = "failed"
+    atomic_json(man_path, bad_man2)
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "invalid_version_status" for e in report["errors"])
+
+
+def test_references_bib_deep_parsing_and_match(tmp_path):
+    """Item 4 test: parse_bib_text on references.bib must match 1-1 with bibtex.json."""
+    upstream = make_valid_dataset(tmp_path)
+    bib_file = tmp_path / f"tables/{KEY}/references.bib"
+
+    # Case A: Unparseable broken bib syntax
+    bib_file.write_text("@article{broken title={no key}}", encoding="utf-8")
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] in ("bib_entries_unparsed", "bib_entry_without_key", "bibtex_file_entry_count_mismatch") for e in report["errors"])
+
+    # Case B: Field mismatch (e.g. year differs)
+    broken_bib = "@article{vaswani2017,\n  title = {Attention is all you need},\n  author = {A. Vaswani},\n  year = {2099}\n}\n"
+    bib_file.write_text(broken_bib, encoding="utf-8")
+    res = run(make_record(), tmp_path, upstream=upstream)
+    assert res.status == "data_error"
+    report = json.loads((tmp_path / res.artifacts["validation"]).read_text(encoding="utf-8"))
+    assert any(e["code"] == "bibtex_field_mismatch" for e in report["errors"])
 
 
 def test_missing_artifact_declaration_fails_without_fallback(tmp_path):
-    """Issue 5 test: if upstream does not declare an artifact, validator must NOT fall back to disk."""
+    """If upstream does not declare an artifact, validator must NOT fall back to disk."""
     upstream = make_valid_dataset(tmp_path)
-    # Remove hierarchy from declared artifacts
     del upstream["stages"]["deduplicate"]["artifacts"]["hierarchy"]
 
     res = run(make_record(), tmp_path, upstream=upstream)
@@ -225,11 +282,10 @@ def test_missing_artifact_declaration_fails_without_fallback(tmp_path):
 
 
 def test_hierarchy_occurrence_mismatch_fails(tmp_path):
-    """Issue 2 test: hierarchy rows must match occurrence edges with exact multiset count."""
+    """Hierarchy rows must match occurrence edges with exact multiset count."""
     upstream = make_valid_dataset(tmp_path)
     hier_file = tmp_path / f"tables/{KEY}/hierarchy.json"
     hier_data = json.loads(hier_file.read_text(encoding="utf-8"))
-    # Add a ghost hierarchy edge not present in occurrences
     hier_data.append({"arxiv_id": PAPER, "version": 1, "element_id": f"{PREFIX}eq1", "parent_id": f"{PREFIX}root1"})
     atomic_json(hier_file, hier_data)
 
@@ -241,11 +297,10 @@ def test_hierarchy_occurrence_mismatch_fails(tmp_path):
 
 
 def test_occurrence_cycle_fails_validation(tmp_path):
-    """Issue 2 test: cycle in occurrences tree is caught."""
+    """Cycle in occurrences tree is caught."""
     upstream = make_valid_dataset(tmp_path)
     v1_occs_file = tmp_path / f"parsed/{KEY}/v1/occurrences.json"
     occs_doc = json.loads(v1_occs_file.read_text(encoding="utf-8"))
-    # Introduce cycle: o_h1_1 -> o_s1_1 -> o_h1_1
     for occ in occs_doc["occurrences"]:
         if occ["occurrence_id"] == "o_h1_1":
             occ["parent_occurrence_id"] = "o_s1_1"
@@ -263,7 +318,6 @@ def test_occurrence_non_continuous_positions_fails(tmp_path):
     upstream = make_valid_dataset(tmp_path)
     v1_occs_file = tmp_path / f"parsed/{KEY}/v1/occurrences.json"
     occs_doc = json.loads(v1_occs_file.read_text(encoding="utf-8"))
-    # In version 1, o_eq1_1 is position 1, change to position 5 (discontinuous)
     for occ in occs_doc["occurrences"]:
         if occ["occurrence_id"] == "o_eq1_1":
             occ["position"] = 5

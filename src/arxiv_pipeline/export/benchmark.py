@@ -4,10 +4,11 @@ Features:
 - Live Pipeline Execution: Executes `pipeline.parse.run(...)` directly under active monitoring.
 - Memory Profiling: `MemorySampler` background thread polling process RSS via `psutil` every 0.2s.
 - Time Profiling: High-precision `time.perf_counter()` for end-to-end wall time.
-- Output Footprint: Computes actual disk usage of generated tables and artifacts.
+- Output Footprint: Computes actual disk usage of generated tables and artifacts strictly within reporting scope.
 - Exact Statistics:
   - `parsing_success_rate_pct` calculated strictly on `successfully_parsed_publications`.
-  - `citations_renamed_count` computed from actual citation rewriting across publications.
+  - `citations_renamed_count` computed from actual citation rewriting within expected versions.
+  - Scope filtering: filters tables and checkpoints by current manifests and input snapshot.
 - Zero Fake Defaults: Eliminates hardcoded synthetic defaults.
 """
 from __future__ import annotations
@@ -24,6 +25,8 @@ from pathlib import Path
 from typing import Any
 
 import psutil
+
+from arxiv_pipeline.common.utils import paper_key
 
 _CITE_RE = re.compile(
     r"\\(?:cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|nocite|"
@@ -125,7 +128,7 @@ def calculate_storage_mb(directory: Path | str) -> float:
     return round(total_bytes / (1024 * 1024), 2)
 
 
-def count_renamed_citations_for_paper(output_dir: Path, key: str) -> int:
+def count_renamed_citations_for_paper(output_dir: Path, key: str, expected_versions: list[int] | None = None) -> int:
     """Calculate how many citations were actually rewritten during deduplication."""
     from arxiv_pipeline.parsing.deduplication import unionize_bibtex
 
@@ -141,6 +144,8 @@ def count_renamed_citations_for_paper(output_dir: Path, key: str) -> int:
         try:
             doc = json.loads(bib_file.read_text(encoding="utf-8"))
             v_num = doc.get("version")
+            if expected_versions is not None and v_num not in expected_versions:
+                continue
             raw_art = doc.get("artifacts", {}).get("raw_bibtex")
             if raw_art and (output_dir / raw_art).exists():
                 raw_doc = json.loads((output_dir / raw_art).read_text(encoding="utf-8"))
@@ -161,6 +166,9 @@ def count_renamed_citations_for_paper(output_dir: Path, key: str) -> int:
             continue
         try:
             doc = json.loads(norm_file.read_text(encoding="utf-8"))
+            v_num = doc.get("version")
+            if expected_versions is not None and v_num not in expected_versions:
+                continue
             art = doc.get("artifacts", {}).get("normalized_tree")
             if art and (output_dir / art).exists():
                 tree_doc = json.loads((output_dir / art).read_text(encoding="utf-8"))
@@ -186,7 +194,7 @@ def generate_parsing_summary(
     total_assigned: int | None = None,
     environment_label: str = "Google Colab CPU-only",
 ) -> dict[str, Any]:
-    """Aggregate stats from parsing manifests and create parsing_summary dict without assumptions."""
+    """Aggregate stats from parsing manifests and create parsing_summary dict filtered by current scope."""
     output = Path(output_dir).resolve()
     manifest_file = output / "manifests/parsing.json"
 
@@ -216,30 +224,55 @@ def generate_parsing_summary(
         for p in paper_outcomes
     )
 
-    # Deduplication stats
+    # Scope papers by current paper_outcomes in manifest with complete=True and matching snapshot
+    valid_scoped_papers = []
+    scoped_tables_dirs = []
+
+    for p in paper_outcomes:
+        if not p.get("complete"):
+            continue
+        p_id = p.get("arxiv_id")
+        if not p_id:
+            continue
+        k = paper_key(p_id)
+        p_dir = output / f"tables/{k}"
+        p_manifest = p_dir / "parsing_manifest.json"
+        dedup_chk = output / f"state/stages/deduplicate/{k}/paper.json"
+
+        if not p_manifest.exists():
+            continue
+
+        try:
+            p_doc = json.loads(p_manifest.read_text(encoding="utf-8"))
+            if p_doc.get("arxiv_id") != p_id or p_doc.get("complete") is not True:
+                continue
+            if dedup_chk.exists():
+                chk_doc = json.loads(dedup_chk.read_text(encoding="utf-8"))
+                chk_snap = chk_doc.get("upstream", {}).get("context", {}).get("input_snapshot_id")
+                if not chk_snap and "context" in chk_doc:
+                    chk_snap = chk_doc.get("context", {}).get("input_snapshot_id")
+                if chk_snap and p_doc.get("input_snapshot_id") != chk_snap:
+                    continue
+            valid_scoped_papers.append((p, p_doc, p_dir))
+            scoped_tables_dirs.append(p_dir)
+        except Exception:
+            continue
+
     elements_before = 0
     elements_after = 0
     bibtex_before = 0
     bibtex_after = 0
     citations_renamed = 0
 
-    tables_dir = output / "tables"
-    if tables_dir.exists():
-        for p_dir in tables_dir.iterdir():
-            if not p_dir.is_dir():
-                continue
-            p_manifest = p_dir / "parsing_manifest.json"
-            if p_manifest.exists():
-                try:
-                    p_doc = json.loads(p_manifest.read_text(encoding="utf-8"))
-                    counts = p_doc.get("counts", {})
-                    elements_before += counts.get("elements_before", 0)
-                    elements_after += counts.get("elements_after", 0)
-                    bibtex_before += counts.get("bibtex_before", 0)
-                    bibtex_after += counts.get("bibtex_after", 0)
-                except Exception:
-                    pass
-            citations_renamed += count_renamed_citations_for_paper(output, p_dir.name)
+    for p, p_doc, p_dir in valid_scoped_papers:
+        counts = p_doc.get("counts", {})
+        elements_before += counts.get("elements_before", 0)
+        elements_after += counts.get("elements_after", 0)
+        bibtex_before += counts.get("bibtex_before", 0)
+        bibtex_after += counts.get("bibtex_after", 0)
+
+        exp_vers = p.get("expected_versions")
+        citations_renamed += count_renamed_citations_for_paper(output, p_dir.name, expected_versions=exp_vers)
 
     elem_reduction_pct = (
         round(((elements_before - elements_after) / elements_before) * 100, 2)
@@ -251,7 +284,7 @@ def generate_parsing_summary(
     )
 
     avg_time_per_pub = round(wall_time_sec / total_assigned, 4) if total_assigned else round(wall_time_sec, 4)
-    storage_mb = calculate_storage_mb(tables_dir)
+    storage_mb = round(sum(calculate_storage_mb(d) for d in scoped_tables_dirs), 2)
 
     return {
         "environment": get_environment_info(environment_label),
