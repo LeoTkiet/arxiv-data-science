@@ -29,7 +29,7 @@ def test_standard_hierarchy_tree():
     tex = r"""
     \section{Introduction}
     This is the first introductory paragraph.
-    
+
     This is the second paragraph.
     \subsection{Background}
     Background text explaining the context.
@@ -138,7 +138,7 @@ def test_figure_and_table_as_figure():
         \includegraphics{plot.png}
         \caption{Sample figure}
     \end{figure}
-    
+
     \begin{table*}
         \centering
         \begin{tabular}{cc} 1 & 2 \end{tabular}
@@ -158,11 +158,11 @@ def test_block_formulas():
     tex = r"""
     \section{Math}
     Standard inline $x = 1$ in prose.
-    
+
     $$ E = mc^2 $$
-    
+
     \[ \int_0^1 f(x) dx \]
-    
+
     \begin{align*}
         a &= b + c \\
         d &= e
@@ -258,3 +258,82 @@ def test_adapter_run_no_source(tmp_path: Path):
     assert payload["schema_version"] == "2.0"
     assert payload["nodes"] == []
     assert len(payload["warnings"]) > 0
+
+def test_formatted_heading_detection_textcolor_textbf():
+    """Verify controlled detection of textcolor + textbf headings (e.g. arXiv 2411.13795)."""
+    tex = r"""
+    \maketitle
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}}
+    This is the first sentence of the introduction.
+
+    This is another paragraph in the introduction with an inline \textcolor{red}{\textbf{bold alert}} that must stay inline.
+
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Concept of hidden altermagnetism.---}}
+    Here we explain the concept.
+
+    \noindent\textbf{\textcolor{blue}{Computational detail.---}}
+    Details on DFT and VASP calculations.
+    """
+    nodes = build_hierarchy_tree(version=1, merged_body_tex=tex)
+
+    headings = [n for n in nodes if n.kind == "heading"]
+    assert len(headings) == 3
+
+    h1, h2, h3 = headings
+    assert "Introduction.---" in h1.raw_content
+    assert h1.level == 3
+    assert h1.heading_rank == 3
+    assert h1.parent_temp_id == nodes[0].temp_id
+
+    assert "Concept of hidden altermagnetism.---" in h2.raw_content
+    assert h2.level == 3
+    assert h2.heading_rank == 3
+    assert h2.parent_temp_id == nodes[0].temp_id
+
+    assert "Computational detail.---" in h3.raw_content
+    assert h3.level == 3
+    assert h3.heading_rank == 3
+    assert h3.parent_temp_id == nodes[0].temp_id
+
+    # Check children of h1: inline bold alert must NOT be a heading
+    h1_children = [n for n in nodes if n.parent_temp_id == h1.temp_id]
+    assert len(h1_children) == 2
+    assert any("bold alert" in n.raw_content for n in h1_children)
+
+
+def test_formatted_heading_paper_2411_13795_reproduction():
+    """Verify exact heading pattern reproduction for paper 2411.13795."""
+    tex = r"""
+    \maketitle
+    %========================Introduction===========================================================
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}}
+    Spin-orbit coupling can induce momentum-dependent spin splitting.
+
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Concept of hidden altermagnetism.---}}
+    To design materials with hidden altermagnetism, we understand symmetry.
+
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Computational detail.---}}
+    Within DFT, calculations are performed using PAW.
+
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Material realization.---}}
+    The Janus Cr2SO monolayer has been confirmed stable.
+
+    \textcolor[rgb]{0.00,0.00,1.00}{\textbf{Discussion and Conclusion.---}}
+    In summary, we generalized the concept of HSP.
+    """
+    nodes = build_hierarchy_tree(version=1, merged_body_tex=tex)
+    headings = [n for n in nodes if n.kind == "heading"]
+    assert len(headings) == 5
+
+    titles = [
+        "Introduction.---",
+        "Concept of hidden altermagnetism.---",
+        "Computational detail.---",
+        "Material realization.---",
+        "Discussion and Conclusion.---",
+    ]
+    for h_node, title in zip(headings, titles):
+        assert title in h_node.raw_content
+        assert h_node.parent_temp_id == nodes[0].temp_id
+        assert h_node.level == 3
+        assert h_node.heading_rank == 3
