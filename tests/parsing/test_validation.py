@@ -133,6 +133,7 @@ def make_valid_dataset(tmp_path: Path):
         "context": {"input_snapshot_id": "snap-123"},
         "stages": {
             "deduplicate": {
+                "stage": "deduplicate", "paper_id": PAPER, "version": None, "schema_version": PARSING_SCHEMA_VERSION,
                 "status": "success",
                 "artifacts": {
                     "elements": f"tables/{KEY}/elements.json",
@@ -370,6 +371,7 @@ def test_no_source_dataset_passes_with_no_source_status(tmp_path):
         "context": {"input_snapshot_id": "snap-empty"},
         "stages": {
             "deduplicate": {
+                "stage": "deduplicate", "paper_id": PAPER, "version": None, "schema_version": PARSING_SCHEMA_VERSION,
                 "status": "no_source",
                 "artifacts": {
                     "elements": f"tables/{KEY}/elements.json",
@@ -619,3 +621,116 @@ def test_issue11_benchmark_zero_handling(tmp_path):
     assert cov["empty_versions_count"] == 0
 
 
+
+
+@pytest.mark.parametrize("artifact,value", [
+    ("parsing_manifest", []), ("elements", [None]), ("hierarchy", [None]),
+    ("bibtex", [None]),
+])
+def test_malformed_artifact_shapes_produce_failure_report(tmp_path, artifact, value):
+    upstream = make_valid_dataset(tmp_path)
+    path = tmp_path / upstream['stages']['deduplicate']['artifacts'][artifact]
+    atomic_json(path, value)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    assert result.status == 'data_error'
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text(encoding='utf-8'))
+    assert report['valid'] is False
+    assert report['errors']
+
+
+@pytest.mark.parametrize("value", [[], {'occurrences': [None]}, {'occurrences': {}}])
+def test_malformed_occurrences_produce_failure_report(tmp_path, value):
+    upstream = make_valid_dataset(tmp_path)
+    atomic_json(tmp_path / f'parsed/{KEY}/v1/occurrences.json', value)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    assert result.status == 'data_error'
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text(encoding='utf-8'))
+    assert report['valid'] is False
+
+
+def test_invalid_manifest_version_shape_produces_failure_report(tmp_path):
+    upstream = make_valid_dataset(tmp_path)
+    path = tmp_path / f'tables/{KEY}/parsing_manifest.json'
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    manifest['versions'] = [None, None]
+    atomic_json(path, manifest)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    assert result.status == 'data_error'
+    assert json.loads((tmp_path / result.artifacts['validation']).read_text())['valid'] is False
+
+
+@pytest.mark.parametrize('field,value', [('stage', 'normalize'), ('paper_id', '2310.99999'),
+                                       ('version', 1), ('schema_version', '1.0')])
+def test_deduplicate_checkpoint_identity_is_required(tmp_path, field, value):
+    upstream = make_valid_dataset(tmp_path)
+    upstream['stages']['deduplicate'][field] = value
+    result = run(make_record(), tmp_path, upstream=upstream)
+    assert result.status == 'data_error'
+    assert json.loads((tmp_path / result.artifacts['validation']).read_text())['valid'] is False
+
+
+def test_blocked_validator_replaces_previous_success_report(tmp_path):
+    upstream = make_valid_dataset(tmp_path)
+    assert run(make_record(), tmp_path, upstream=upstream).status == 'success'
+    upstream['stages']['deduplicate']['status'] = 'error'
+    result = run(make_record(), tmp_path, upstream=upstream)
+    assert result.status == 'skipped'
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text())
+    assert report['valid'] is False
+    assert report['status'] == 'skipped'
+
+
+
+def test_nullable_title_is_not_a_valid_bibtex_string(tmp_path):
+    upstream = make_valid_dataset(tmp_path)
+    path = tmp_path / f'tables/{KEY}/bibtex.json'
+    rows = json.loads(path.read_text())
+    rows[0]['title'] = None
+    atomic_json(path, rows)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text())
+    assert result.status == 'data_error'
+    assert any(e['code'] == 'invalid_title_type' for e in report['errors'])
+
+
+def test_boolean_occurrence_header_version_is_rejected(tmp_path):
+    upstream = make_valid_dataset(tmp_path)
+    path = tmp_path / f'parsed/{KEY}/v1/occurrences.json'
+    payload = json.loads(path.read_text())
+    payload['version'] = True
+    atomic_json(path, payload)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text())
+    assert any(e['code'] == 'invalid_occurrences_version' for e in report['errors'])
+
+
+def test_tv4_repeated_ancestor_content_is_valid_on_occurrence_tree(tmp_path):
+    from arxiv_pipeline.parsing.deduplication import deduplicate_elements_and_build_hierarchy
+    upstream = make_valid_dataset(tmp_path)
+    nodes = [dict(temp_id='root', parent_temp_id=None, position=0, kind='document', cleaned_content='Root'),
+             dict(temp_id='a', parent_temp_id='root', position=0, kind='heading', cleaned_content='Methods'),
+             dict(temp_id='b', parent_temp_id='a', position=0, kind='heading', cleaned_content='Methods')]
+    elements, hierarchy, occurrences, _ = deduplicate_elements_and_build_hierarchy(PAPER, [(1, nodes), (2, nodes)])
+    atomic_json(tmp_path / f'tables/{KEY}/elements.json', elements)
+    atomic_json(tmp_path / f'tables/{KEY}/hierarchy.json', hierarchy)
+    for n in (1, 2):
+        atomic_json(tmp_path / f'parsed/{KEY}/v{n}/occurrences.json', dict(
+            schema_version=PARSING_SCHEMA_VERSION, arxiv_id=PAPER, version=n, occurrences=occurrences[n]))
+    path = tmp_path / f'tables/{KEY}/parsing_manifest.json'
+    manifest = json.loads(path.read_text())
+    manifest['counts'].update(elements_before=6, elements_after=len(elements))
+    atomic_json(path, manifest)
+    assert any(row['element_id'] == row['parent_id'] for row in hierarchy)
+    assert run(make_record(), tmp_path, upstream=upstream).status == 'success'
+
+
+
+@pytest.mark.parametrize('record', [None, {}, {'arxiv_id': 42},
+                                    {'arxiv_id': PAPER, 'versions': []},
+                                    {'arxiv_id': PAPER, 'versions': [{'version': True}]}])
+def test_malformed_record_cannot_crash_or_validate(tmp_path, record):
+    upstream = make_valid_dataset(tmp_path)
+    result = run(record, tmp_path, upstream=upstream)
+    assert result.status == 'data_error'
+    if result.artifacts:
+        assert json.loads((tmp_path / result.artifacts['validation']).read_text())['valid'] is False

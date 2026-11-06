@@ -14,6 +14,7 @@ Features:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -27,6 +28,8 @@ from typing import Any
 import psutil
 
 from arxiv_pipeline.common.utils import paper_key
+from arxiv_pipeline.common.schemas import PARSING_SCHEMA_VERSION
+from arxiv_pipeline.reporting.milestone2.validation import safe_path
 
 _CITE_RE = re.compile(
     r"\\(?:cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|nocite|"
@@ -53,11 +56,11 @@ def get_cpu_model() -> str:
     return platform.processor() or "Unknown CPU"
 
 
-def get_environment_info(label: str = "Google Colab CPU-only") -> dict[str, Any]:
+def get_environment_info(label: str | None = None) -> dict[str, Any]:
     """Retrieve runtime hardware and software specifications."""
     total_ram_gb = round(psutil.virtual_memory().total / (1024 ** 3), 2)
     return {
-        "platform": label,
+        "platform": label or platform.platform(),
         "cpu_model": get_cpu_model(),
         "cpu_cores": os.cpu_count() or 1,
         "total_ram_gb": total_ram_gb,
@@ -128,64 +131,112 @@ def calculate_storage_mb(directory: Path | str) -> float:
     return round(total_bytes / (1024 * 1024), 2)
 
 
-def count_renamed_citations_for_paper(output_dir: Path | str, key: str, expected_versions: set[int] | list[int] | None = None) -> int:
-    """Calculate how many citations were actually rewritten during deduplication."""
+def _read_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (ValueError, OSError) as exc:
+        raise ValueError(f'Cannot read benchmark evidence: {path.name}') from exc
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _verified_stage(output: Path, key: str, stage: str, version: int | None):
+    """Read actual Orchestrator checkpoints and verify their recorded byte hashes."""
+    relative = f'state/stages/{stage}/{key}/{version or "paper"}.json'
+    checkpoint = safe_path(output, relative)
+    doc = _read_json(checkpoint)
+    meta = _read_json(checkpoint.with_name(checkpoint.stem + '.dependencies.json'))
+    if not isinstance(doc, dict) or not isinstance(meta, dict):
+        raise ValueError(f'Malformed {stage} checkpoint/dependencies for {key}')
+    if (doc.get('stage'), doc.get('version'), doc.get('schema_version')) != (
+            stage, version, PARSING_SCHEMA_VERSION) or doc.get('status') not in {'success', 'no_source'}:
+        raise ValueError(f'Unready/mismatched {stage} checkpoint for {key}')
+    if version is not None and type(doc.get('version')) is not int:
+        raise ValueError('Checkpoint version must be an integer')
+    if paper_key(doc.get('paper_id', '')) != key:
+        raise ValueError(f'Checkpoint paper does not match {key}')
+    encoded = json.dumps(doc, sort_keys=True, ensure_ascii=True, separators=(',', ':'), allow_nan=False).encode()
+    if meta.get('schema_version') != PARSING_SCHEMA_VERSION or meta.get('checkpoint_hash') != hashlib.sha256(encoded).hexdigest():
+        raise ValueError(f'Changed {stage} checkpoint for {key}')
+    if not isinstance(meta.get('fingerprint'), str) or not meta['fingerprint']:
+        raise ValueError(f'Missing {stage} dependency fingerprint for {key}')
+    artifacts = doc.get('artifacts')
+    if not isinstance(artifacts, dict) or not artifacts:
+        raise ValueError(f'Missing {stage} artifacts for {key}')
+    inventory = {}
+    for relative in artifacts.values():
+        path = safe_path(output, relative)
+        if not path.is_file():
+            raise ValueError(f'Missing {stage} artifact for {key}')
+        inventory[relative] = _sha256(path)
+    if inventory != meta.get('artifacts'):
+        raise ValueError(f'Changed {stage} artifact for {key}')
+    return doc
+
+
+def count_renamed_citations_for_paper(output_dir: Path | str, key: str,
+                                     expected_versions: set[int] | list[int] | None = None) -> int:
+    """Count rewritten input key occurrences using the same numeric version order as TV4."""
     from arxiv_pipeline.parsing.deduplication import unionize_bibtex
 
-    out = Path(output_dir).resolve()
-    state_bib = out / f"state/stages/bibliography/{key}"
-    state_norm = out / f"state/stages/normalize/{key}"
-    if not state_bib.exists() or not state_norm.exists():
-        return 0
+    output = Path(output_dir).resolve()
+    if expected_versions is None:
+        dedup = _verified_stage(output, key, 'deduplicate', None)
+        manifest = _read_json(safe_path(output, dedup['artifacts']['parsing_manifest']))
+        expected_versions = manifest['expected_versions']
+    if not isinstance(expected_versions, (list, set, tuple)) or any(type(n) is not int or n < 1 for n in expected_versions):
+        raise ValueError("Citation statistics require positive integer versions")
+    numbers = sorted(expected_versions)
+    if not numbers or len(numbers) != len(set(numbers)):
+        raise ValueError('Citation statistics require unique positive version numbers')
+    entries, trees = [], []
+    for number in numbers:
+        for stage, artifact in [('bibliography', 'raw_bibtex'), ('normalize', 'normalized_tree')]:
+            checkpoint = _verified_stage(output, key, stage, number)
+            payload = _read_json(safe_path(output, checkpoint['artifacts'][artifact]))
+            if not isinstance(payload, dict) or (
+                payload.get('schema_version'), payload.get('arxiv_id'), payload.get('version')
+            ) != (PARSING_SCHEMA_VERSION, checkpoint['paper_id'], number):
+                raise ValueError(f'Mismatched {stage} payload for {key} v{number}')
+            if stage == 'bibliography':
+                entries.append((number, payload['entries']))
+            else:
+                trees.append(payload['nodes'])
+    _, mapping, _ = unionize_bibtex(entries)
+    return sum(1 for nodes in trees for node in nodes
+               for match in _CITE_RE.finditer(node['cleaned_content'])
+               for token in match.group(1).split(',')
+               if token.strip() in mapping and mapping[token.strip()] != token.strip())
 
-    exp_set = set(expected_versions) if expected_versions is not None else None
 
-    bib_entries = []
-    for bib_file in sorted(state_bib.glob("*.json")):
-        if bib_file.name == "paper.json":
-            continue
-        try:
-            doc = json.loads(bib_file.read_text(encoding="utf-8"))
-            v_num = doc.get("version")
-            if exp_set is not None and v_num not in exp_set:
-                continue
-            raw_art = doc.get("artifacts", {}).get("raw_bibtex")
-            if raw_art and (out / raw_art).exists():
-                raw_doc = json.loads((out / raw_art).read_text(encoding="utf-8"))
-                bib_entries.append((v_num, raw_doc.get("entries", [])))
-        except Exception:
-            pass
-
-    if not bib_entries:
-        return 0
-
-    _, key_mapping, _ = unionize_bibtex(bib_entries)
-    if not key_mapping:
-        return 0
-
-    renamed_count = 0
-    for norm_file in sorted(state_norm.glob("*.json")):
-        if norm_file.name == "paper.json":
-            continue
-        try:
-            doc = json.loads(norm_file.read_text(encoding="utf-8"))
-            v_num = doc.get("version")
-            if exp_set is not None and v_num not in exp_set:
-                continue
-            art = doc.get("artifacts", {}).get("normalized_tree")
-            if art and (out / art).exists():
-                tree_doc = json.loads((out / art).read_text(encoding="utf-8"))
-                for node in tree_doc.get("nodes", []):
-                    text = node.get("cleaned_content", "")
-                    for match in _CITE_RE.finditer(text):
-                        for token in re.split(r"\s*,\s*", match.group(1)):
-                            k = token.strip()
-                            if k in key_mapping and key_mapping[k] != k:
-                                renamed_count += 1
-        except Exception:
-            pass
-
-    return renamed_count
+def _verified_export(output: Path, outcome: dict):
+    key = paper_key(outcome['arxiv_id'])
+    dedup = _verified_stage(output, key, 'deduplicate', None)
+    validation = _verified_stage(output, key, 'validate_parse', None)
+    if dedup['artifacts'] != outcome.get('artifacts') or dedup['status'] != outcome.get('status'):
+        raise ValueError(f'Paper outcome/export checkpoint mismatch for {key}')
+    manifest = _read_json(safe_path(output, dedup['artifacts']['parsing_manifest']))
+    report = _read_json(safe_path(output, validation['artifacts']['validation']))
+    snapshot = manifest.get('input_snapshot_id')
+    if (manifest.get('schema_version'), manifest.get('arxiv_id'), manifest.get('complete')) != (
+            PARSING_SCHEMA_VERSION, outcome['arxiv_id'], True):
+        raise ValueError(f'Invalid export manifest for {key}')
+    if not isinstance(snapshot, str) or not snapshot.strip() or (
+        report.get('schema_version'), report.get('arxiv_id'), report.get('input_snapshot_id'), report.get('valid')
+    ) != (PARSING_SCHEMA_VERSION, outcome['arxiv_id'], snapshot, True) or report.get('valid') is not True:
+        raise ValueError(f'Validation/export snapshot mismatch for {key}')
+    if manifest.get('expected_versions') != outcome.get('expected_versions'):
+        raise ValueError(f'Export version coverage mismatch for {key}')
+    for name in ('elements', 'hierarchy', 'bibtex', 'bibtex_file'):
+        if manifest.get('tables', {}).get(name) != dedup['artifacts'].get(name):
+            raise ValueError(f'Export table declarations mismatch for {key}')
+    return manifest, dedup['artifacts']
 
 
 def generate_parsing_summary(
@@ -195,22 +246,20 @@ def generate_parsing_summary(
     avg_ram_mb: float,
     *,
     total_assigned: int | None = None,
-    environment_label: str = "Google Colab CPU-only",
+    environment_label: str | None = None,
 ) -> dict[str, Any]:
     """Aggregate stats from parsing manifests and create parsing_summary dict filtered by current scope."""
     output = Path(output_dir).resolve()
     manifest_file = output / "manifests/parsing.json"
 
-    paper_outcomes = []
-    if manifest_file.exists():
-        try:
-            paper_outcomes = json.loads(manifest_file.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-
+    paper_outcomes = _read_json(manifest_file)
+    if not isinstance(paper_outcomes, list) or any(not isinstance(p, dict) or type(p.get("complete")) is not bool for p in paper_outcomes):
+        raise ValueError('Parsing run manifest must be a list of paper outcomes')
+    if total_assigned is not None and (type(total_assigned) is not int or total_assigned < 0):
+        raise ValueError('total_assigned must be a non-negative integer')
     assigned_count = total_assigned if total_assigned is not None else len(paper_outcomes)
-    successful_papers = [p for p in paper_outcomes if p.get("complete") and p.get("status") == "success"]
-    empty_papers = [p for p in paper_outcomes if p.get("complete") and p.get("status") == "no_source"]
+    successful_papers = [p for p in paper_outcomes if p.get("complete") is True and p.get("status") == "success"]
+    empty_papers = [p for p in paper_outcomes if p.get("complete") is True and p.get("status") == "no_source"]
     success_count = len(successful_papers)
     empty_count = len(empty_papers)
 
@@ -227,39 +276,14 @@ def generate_parsing_summary(
         for p in paper_outcomes
     )
 
-    # Scope papers by current paper_outcomes in manifest with complete=True and matching snapshot
     valid_scoped_papers = []
-    scoped_tables_dirs = []
-
-    for p in paper_outcomes:
-        if not p.get("complete"):
+    exported_paths = set()
+    for outcome in paper_outcomes:
+        if outcome.get('complete') is not True:
             continue
-        p_id = p.get("arxiv_id")
-        if not p_id:
-            continue
-        k = paper_key(p_id)
-        p_dir = output / f"tables/{k}"
-        p_manifest = p_dir / "parsing_manifest.json"
-        dedup_chk = output / f"state/stages/deduplicate/{k}/paper.json"
-
-        if not p_manifest.exists():
-            continue
-
-        try:
-            p_doc = json.loads(p_manifest.read_text(encoding="utf-8"))
-            if p_doc.get("arxiv_id") != p_id or p_doc.get("complete") is not True:
-                continue
-            if dedup_chk.exists():
-                chk_doc = json.loads(dedup_chk.read_text(encoding="utf-8"))
-                chk_snap = chk_doc.get("upstream", {}).get("context", {}).get("input_snapshot_id")
-                if not chk_snap and "context" in chk_doc:
-                    chk_snap = chk_doc.get("context", {}).get("input_snapshot_id")
-                if chk_snap and p_doc.get("input_snapshot_id") != chk_snap:
-                    continue
-            valid_scoped_papers.append((p, p_doc, p_dir, k))
-            scoped_tables_dirs.append(p_dir)
-        except Exception:
-            continue
+        manifest, artifacts = _verified_export(output, outcome)
+        valid_scoped_papers.append((outcome, manifest, paper_key(outcome['arxiv_id'])))
+        exported_paths.update(safe_path(output, relative) for relative in artifacts.values())
 
     elements_before = 0
     elements_after = 0
@@ -267,7 +291,7 @@ def generate_parsing_summary(
     bibtex_after = 0
     citations_renamed = 0
 
-    for p, p_doc, p_dir, k in valid_scoped_papers:
+    for p, p_doc, k in valid_scoped_papers:
         counts = p_doc.get("counts", {})
         elements_before += counts.get("elements_before", 0)
         elements_after += counts.get("elements_after", 0)
@@ -286,8 +310,8 @@ def generate_parsing_summary(
         if bibtex_before > bibtex_after else 0.0
     )
 
-    avg_time_per_pub = round(wall_time_sec / assigned_count, 4) if assigned_count > 0 else round(wall_time_sec, 4)
-    storage_mb = round(sum(calculate_storage_mb(d) for d in scoped_tables_dirs), 2)
+    avg_time_per_pub = round(wall_time_sec / len(paper_outcomes), 4) if paper_outcomes else 0.0
+    storage_mb = round(sum(path.stat().st_size for path in exported_paths) / (1024 * 1024), 2)
 
     return {
         "environment": get_environment_info(environment_label),
@@ -343,7 +367,7 @@ def execute_pipeline_benchmark(
         wall_time = time.perf_counter() - t0
         peak_mb, avg_mb, _ = sampler.stop()
 
-    total = total_assigned or parse_summary.get("papers") or 1
+    total = total_assigned if total_assigned is not None else parse_summary["papers"]
     summary = generate_parsing_summary(
         out,
         wall_time_sec=wall_time,

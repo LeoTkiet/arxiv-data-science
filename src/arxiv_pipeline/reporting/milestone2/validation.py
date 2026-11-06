@@ -50,9 +50,15 @@ def safe_path(output_dir: Path, relative: str) -> Path:
     if not isinstance(relative, str) or not relative:
         raise ValueError("Artifact path must be a non-empty string")
     candidate = Path(relative)
-    if candidate.is_absolute() or PureWindowsPath(relative).drive or ".." in relative.replace("\\", "/").split("/"):
+    if candidate.is_absolute() or PureWindowsPath(relative).drive or PureWindowsPath(relative).root or "\\" in relative or ".." in candidate.parts:
         raise ValueError("Absolute or parent artifact paths are forbidden")
-    path = (output_dir / candidate).resolve()
+    unresolved = output_dir / candidate
+    for ancestor in (unresolved, *unresolved.parents):
+        if ancestor == output_dir:
+            break
+        if ancestor.is_symlink() or getattr(ancestor, "is_junction", lambda: False)():
+            raise ValueError("Linked artifacts are forbidden")
+    path = unresolved.resolve()
     if not path.is_relative_to(output_dir.resolve()):
         raise ValueError("Artifact path escapes output root")
     if any(p.is_symlink() for p in (path, *path.parents) if p != output_dir and output_dir in p.parents):
@@ -60,7 +66,7 @@ def safe_path(output_dir: Path, relative: str) -> Path:
     return path
 
 
-def run(
+def _validate(
     record: dict[str, Any],
     output_dir: Path | str,
     *,
@@ -421,10 +427,13 @@ def run(
             issue("manifest", "invalid_occurrences_schema", f"Version {v_num} occurrences schema {occ_data.get('schema_version')} != {PARSING_SCHEMA_VERSION}")
         if occ_data.get("arxiv_id") != paper_id:
             issue("manifest", "invalid_occurrences_arxiv_id", f"Version {v_num} occurrences arxiv_id != {paper_id}")
-        if occ_data.get("version") != v_num:
+        if type(occ_data.get("version")) is not int or occ_data.get("version") != v_num:
             issue("manifest", "invalid_occurrences_version", f"Version {v_num} occurrences version field != {v_num}")
 
-        occs = occ_data.get("occurrences", [])
+        occs = occ_data.get("occurrences")
+        if not isinstance(occs, list):
+            issue("schema", "invalid_occurrences_list", f"Version {v_num} occurrences must be a list")
+            continue
 
         if v_status == "no_source":
             if occs:
@@ -559,6 +568,7 @@ def run(
         ckey = row.get("citation_key")
         etype = row.get("entry_type")
         authors = row.get("authors")
+        title = row.get("title")
         year = row.get("year")
         doi = row.get("doi")
         journal = row.get("journal")
@@ -576,6 +586,9 @@ def run(
 
         if not isinstance(etype, str) or not etype.strip():
             issue("schema", "empty_entry_type", f"BibTeX row {idx} entry_type is empty")
+
+        if not isinstance(title, str):
+            issue("schema", "invalid_title_type", f"BibTeX key {ckey} title must be a string")
 
         if not isinstance(authors, list) or not all(isinstance(a, str) for a in authors):
             issue("schema", "invalid_authors_type", f"BibTeX key {ckey} authors must be a list of strings")
@@ -692,3 +705,65 @@ def run(
 
     err_info = ErrorInfo("validation_failed", "; ".join(e["message"] for e in errors[:5])) if errors else None
     return result(final_status, err_info)
+
+
+
+def run(record: dict[str, Any], output_dir: Path | str, *,
+        version: dict[str, Any] | None = None,
+        upstream: dict[str, Any] | None = None) -> StageResult:
+    """Return a fresh failure report for malformed input as well as failed checks."""
+    paper_id = record.get('arxiv_id', '') if isinstance(record, dict) else ''
+    output = Path(output_dir).resolve()
+
+    def failure(status: str, kind: str, message: str) -> StageResult:
+        artifacts = {}
+        error = ErrorInfo(kind, message)
+        try:
+            relative = f'validation/parsing/{paper_key(paper_id)}.json'
+            context = upstream.get('context') if isinstance(upstream, dict) else None
+            snapshot = context.get('input_snapshot_id') if isinstance(context, dict) else None
+            atomic_json(safe_path(output, relative), {
+                'schema_version': PARSING_SCHEMA_VERSION, 'arxiv_id': paper_id,
+                'input_snapshot_id': snapshot, 'valid': False, 'status': status,
+                'counts': {}, 'checks': {'schema_integrity': False},
+                'errors': [{'category': 'schema', 'code': kind, 'message': message,
+                            'paper_id': paper_id, 'details': None}], 'warnings': [],
+            })
+            artifacts['validation'] = relative
+        except (OSError, AttributeError, TypeError, ValueError):
+            # Do not declare a report that could not be written, including an old one.
+            pass
+        return StageResult('validate_parse', paper_id if isinstance(paper_id, str) else '',
+                           None, status, utc_now(), artifacts, error,
+                           schema_version=PARSING_SCHEMA_VERSION)
+
+    try:
+        paper_key(paper_id)
+        versions = record.get('versions')
+        if (not isinstance(versions, list) or not versions
+                or any(not isinstance(v, dict) or type(v.get('version')) is not int for v in versions)
+                or [v['version'] for v in versions] != list(range(1, len(versions) + 1))):
+            raise ValueError('Discovery must list every version as integers 1..N')
+        if version is not None:
+            raise ValueError('Validation is a paper-level stage; version must be None')
+        if not isinstance(upstream, dict) or not isinstance(upstream.get('context'), dict):
+            raise ValueError('Validation requires a context/stages envelope')
+        if not isinstance(upstream.get('stages'), dict):
+            raise ValueError('Validation requires a stages mapping')
+        dedup = upstream['stages'].get('deduplicate')
+        if dedup is None:
+            return failure('skipped', 'upstream_missing', 'Deduplicate checkpoint is missing')
+        if not isinstance(dedup, dict) or (
+            dedup.get('stage'), dedup.get('paper_id'), dedup.get('version'), dedup.get('schema_version')
+        ) != ('deduplicate', paper_id, None, PARSING_SCHEMA_VERSION):
+            return failure('data_error', 'upstream_identity_mismatch',
+                           'Deduplicate checkpoint stage/paper/version/schema mismatch')
+        if dedup.get('status') not in {'success', 'no_source'}:
+            return failure('skipped', 'upstream_not_ready', f"Deduplicate status: {dedup.get('status')}")
+        if not isinstance(dedup.get('artifacts'), dict):
+            raise ValueError('Deduplicate artifacts must be a mapping')
+        return _validate(record, output, version=version, upstream=upstream)
+    except (AttributeError, TypeError, KeyError, ValueError) as exc:
+        return failure('data_error', 'malformed_validation_input', str(exc))
+    except OSError as exc:
+        return failure('error', 'validation_io_error', str(exc))
