@@ -27,6 +27,24 @@ stage `no_source`, không có validation error. Có 214 cảnh báo `bib_field_c
 chất lượng thư mục trích dẫn. Mẫu TV5 được chạy lại cùng bộ mã trong đợt nghiệm
 thu này; đọc receipt local bên dưới cho kết quả cuối và kiểm tra resume.
 
+Lượt nghiệm thu mới trên cả bốn bài/sáu version tại commit `ef2845c` dùng đủ
+module thật: 26 stage `success`, sáu stage `no_source`, cả bốn validator có
+`valid=true`, không có error. Tổng đầu ra: 1.176 elements, 1.738 hierarchy,
+371 bibtex; mọi hàng hierarchy đúng bốn cột theo đề. Có 218 cảnh báo
+`bib_field_conflict` cần đối chiếu nội dung, gồm 214 từ mẫu TV1 và bốn từ mẫu TV5.
+Resume tái sử dụng đủ 32 checkpoint; SHA-256 của 58 file MS1 không đổi.
+
+Thử thêm trên bản sao output của 2508.17871: chọn riêng v1 làm kết quả incomplete
+và vô hiệu hóa export cũ; chọn lại đủ v1/v2 giữ tám checkpoint version, dựng lại
+deduplication/validation. Sửa thử một hàng elements cũng được phát hiện và tự
+dựng lại đúng hash bảng ban đầu. Không sửa input hoặc output nghiệm thu chính
+để tạo các tình huống này. Bằng chứng ở `local-receipt.json` và
+`recovery-receipt.json` dưới output đợt nghiệm thu.
+
+Toàn bộ tests: **432 passed, 1 skipped, 65 subtests passed**. Test skip cần quyền
+tạo symlink trên Windows. Notebook được kiểm tra schema/cú pháp và chạy cell
+nghiệm thu bằng fixture lẫn snapshot thật trên máy local; chưa mount/chạy Colab.
+
 Các đường dẫn local dưới đây tính từ repo gốc, không phải worktree và không
 được đưa corpus vào Git:
 
