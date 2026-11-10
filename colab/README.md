@@ -1,4 +1,29 @@
-# Notebook MS1 CPU-only
+# Notebook chạy trên CPU
+
+## Milestone 2: tích hợp và nghiệm thu
+
+Mở [MS2_Integration_CPU.ipynb](MS2_Integration_CPU.ipynb). Notebook dùng module
+thật của TV1–TV5, giữ MS1/MS2 ở hai root riêng, đo thời gian/RAM và thử resume.
+Mỗi người chọn `MEMBER` (tv1–tv5), nhập `MS1_INPUT` là data MS1 của mình và
+chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại cell lựa chọn,
+cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
+notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
+FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
+Mã production cố định tại `b932d98eae90d50611004ccc5e2d91709a77b7bf` để các
+thành viên dùng cùng phiên bản đã nghiệm thu.
+
+`acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
+cảnh báo. Output tách theo `<OUTPUT_ROOT>/<RUN_TAG>/<smoke|full>/<MEMBER>/`;
+các thành viên chạy song song trên output riêng. Không chạy hai runtime ghi
+cùng output của một người. Notebook cá nhân không ghi group receipt dùng chung.
+Cell cuối có `CREATE_ZIP=True` để đóng gói riêng kết quả thành viên, gửi TV1
+tích hợp và TV5 thống kê. Giữ checkpoint, dependency hashes, tables, parsed và
+validation. Không dùng thời gian resume làm tốc độ parsing mới; receipt ghi rõ
+resume bật hay tắt. SMOKE kiểm tra cache; FULL mặc định bỏ lượt đọc lại kiểm tra
+cache để giảm I/O Drive, có thể bật `VERIFY_RESUME` nếu cần.
+Notebook này chưa được thực thi trên Colab trong lần nghiệm thu local.
+
+## Milestone 1
 
 Mở `MS1_Benchmark_CPU.ipynb` trên Colab, chọn CPU, chạy setup thành công rồi chọn phạm vi. Source cố định tại commit đã đo/kiểm chứng `4ea44c42810f3bb1564080c19d1ed889f3498ee0`. Không tự đổi sang `main` hay bỏ qua test lỗi.
 

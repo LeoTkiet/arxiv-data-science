@@ -173,10 +173,9 @@ vẫn nhận version không có TeX để xử lý `.bib` nếu còn; version em
 loại khỏi mẫu số coverage. Discovery `not_found`/`invalid_id` được ghi riêng ở
 `excluded_inputs`, không tạo publication giả.
 
-Resolver/Hierarchy đã có implementation. Normalization, Bibliography,
-Deduplication hoặc Validation MS2 chưa bàn giao sẽ trả `not_implemented` và làm
-lượt chạy incomplete; framework không giả lập output thành công trong CLI thật.
-Unit tests dùng adapters giả lập để kiểm tra luồng và các trường hợp lỗi offline.
+Sáu module thật đã tích hợp trên `main`, gồm validator TV5 sau PR #19.
+Module thiếu vẫn trả `not_implemented` và làm lượt chạy incomplete. Tests gồm
+các ca điều phối bằng mock và các ca chạy đủ module thật bằng fixture offline.
 
 Đầu ra điều phối chính:
 
@@ -201,3 +200,9 @@ bị ngắt. Chi tiết envelope và artifact xem [hợp đồng MS2](docs/MS2_C
 ```powershell
 python -m pytest tests/pipeline/test_parse.py tests/pipeline/test_cli.py -q
 ```
+
+Notebook [MS2 Integration CPU](colab/MS2_Integration_CPU.ipynb) chạy module thật,
+đo tài nguyên, kiểm tra resume và ghi bằng chứng theo từng thành viên. Chọn mẫu
+bằng danh sách ID; chỉ chạy mọi record khi đã có snapshot đầy đủ. Đối chiếu đúng
+ID được giao trước khi xác nhận toàn phạm vi, không chỉ so số lượng. Xem kết quả
+và giới hạn nghiệm thu trong [bàn giao MS2](docs/MS2_HANDOFF.md).

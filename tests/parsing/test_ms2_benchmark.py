@@ -52,6 +52,103 @@ def summarize(output, **kwargs):
     return generate_parsing_summary(output, wall_time_sec=20, peak_ram_mb=10, avg_ram_mb=8, **kwargs)
 
 
+def test_note_only_source_reference_passes_real_pipeline_validation(tmp_path):
+    output = make_parsed_output(tmp_path, count=1)
+    corpus = tmp_path / f'ms1/corpus/{PAPER}/v1'
+    (corpus / 'main.tex').write_text(
+        r'\documentclass{article}\begin{document}\section{Intro}'
+        r'A note \cite{footnote1}.\bibliography{refs}\end{document}', encoding='utf-8')
+    (corpus / 'refs.bib').write_text(
+        '@misc{footnote1, note={Additional explanation without bibliographic fields.}}', encoding='utf-8')
+    result = parse.run([PAPER], output, input_root=tmp_path / 'ms1', resume=True)
+    assert result['complete'], result
+    report = json.loads((output / f'validation/parsing/{PAPER}.json').read_text())
+    assert report['valid'] and report['errors'] == []
+    assert report['counts']['bibtex_entries'] == 1
+
+
+@pytest.mark.parametrize('full_scope,assigned_count', [(False, 2), (True, 2), (True, 1)])
+def test_colab_acceptance_cell_runs_real_modules_and_checks_assignment_coverage(tmp_path, full_scope, assigned_count):
+    make_parsed_output(tmp_path, count=1)
+    notebook = json.loads((Path(__file__).parents[2] / 'colab/MS2_Integration_CPU.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(cell['source']) for cell in notebook['cells']
+                if cell['cell_type'] == 'code' and 'results = []' in ''.join(cell['source']))
+    context = dict(JOBS=[dict(member='tv1', input=str(tmp_path / 'ms1'),
+                             ids=None if full_scope else [PAPER], total_assigned=assigned_count,
+                             assignment_range=f'{PAPER}:' + ('2310.12346' if assigned_count == 2 else PAPER))],
+                   OUTPUT_BASE=tmp_path / 'acceptance', CODE_SHA='test-offline',
+                   RESUME=True, CHECK_RESUME=True, Path=Path)
+    exec(compile(code, 'MS2_Integration_CPU.ipynb', 'exec'), context)
+    result = json.loads((tmp_path / 'acceptance/tv1/acceptance.json').read_text())
+    expected_complete = not full_scope or assigned_count == 1
+    assert result['complete'] is expected_complete
+    assert result['resume_all_cached'] is expected_complete
+    assert result['unseen_assigned_ids'] == (['2310.12346'] if assigned_count == 2 else [])
+    assert result['full_assignment_accepted'] is (full_scope and assigned_count == 1)
+    assert result['scope'] == ('all_assigned_ids' if full_scope else 'selected_sample')
+    assert not (tmp_path / 'acceptance/group-acceptance.json').exists()
+
+
+def test_colab_acceptance_rejects_missing_selected_discovery(tmp_path):
+    make_parsed_output(tmp_path, count=1)
+    notebook = json.loads((Path(__file__).parents[2] / 'colab/MS2_Integration_CPU.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(cell['source']) for cell in notebook['cells']
+                if cell['cell_type'] == 'code' and 'results = []' in ''.join(cell['source']))
+    context = dict(JOBS=[dict(member='tv1', input=str(tmp_path / 'ms1'), ids=['2310.12346'],
+                             total_assigned=2, assignment_range=f'{PAPER}:2310.12346')],
+                   OUTPUT_BASE=tmp_path / 'acceptance', CODE_SHA='test-offline',
+                   RESUME=True, CHECK_RESUME=True, Path=Path)
+    exec(compile(code, 'MS2_Integration_CPU.ipynb', 'exec'), context)
+    result = json.loads((tmp_path / 'acceptance/tv1/acceptance.json').read_text())
+    assert result['complete'] is False
+    assert result['incomplete_papers'] == ['2310.12346']
+    assert result['full_assignment_accepted'] is False
+
+
+@pytest.mark.parametrize('member,assignment_range', [
+    ('tv1', '2508.12872:2508.17871'),
+    ('tv2', '2506.15788:2506.20787'),
+    ('tv3', '2411.08799:2411.13798'),
+    ('tv4', '2410.18025:2410.23024'),
+    ('tv5', '2410.03025:2410.08024'),
+])
+@pytest.mark.parametrize('mode', ['SMOKE', 'FULL'])
+def test_member_notebook_selects_official_range_and_separate_output(tmp_path, member, assignment_range, mode):
+    repo = Path(__file__).parents[2]
+    notebook = json.loads((repo / 'colab/MS2_Integration_CPU.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(cell['source']) for cell in notebook['cells']
+                if cell['cell_type'] == 'code' and 'MEMBER_ROWS =' in ''.join(cell['source']))
+    source = tmp_path / 'ms1'
+    source.mkdir()
+    smoke_id = assignment_range.split(':')[0]
+    context = dict(Path=Path, REPO=repo, MEMBER=member, RUN_MODE=mode,
+                   MS1_INPUT=str(source), OUTPUT_ROOT=str(tmp_path / 'outputs'),
+                   RUN_TAG='same-team-run', SMOKE_IDS=smoke_id, VERIFY_RESUME=False,
+                   CODE_SHA='test-pinned-code')
+    exec(compile(code, 'member-config', 'exec'), context)
+    job, = context['JOBS']
+    assert job['member'] == member and job['assignment_range'] == assignment_range
+    assert job['total_assigned'] == 5000
+    assert job['ids'] == ([smoke_id] if mode == 'SMOKE' else None)
+    assert context['OUTPUT_BASE'] / member == tmp_path / 'outputs/same-team-run' / mode.lower() / member
+    assert context['CHECK_RESUME'] is (mode == 'SMOKE')
+
+
+def test_member_zip_contains_only_selected_member(tmp_path):
+    import zipfile
+    notebook = json.loads((Path(__file__).parents[2] / 'colab/MS2_Integration_CPU.ipynb').read_text(encoding='utf-8'))
+    code = next(''.join(cell['source']) for cell in notebook['cells']
+                if cell['cell_type'] == 'code' and 'CREATE_ZIP = False' in ''.join(cell['source']))
+    for member in ['tv1', 'tv2']:
+        (tmp_path / member).mkdir()
+        (tmp_path / member / 'acceptance.json').write_text('{}')
+        (tmp_path / member / 'result.txt').write_text(member)
+    context = dict(Path=Path, OUTPUT_BASE=tmp_path, MEMBER='tv1', RUN_TAG='test', RUN_MODE='FULL')
+    exec(compile(code.replace('CREATE_ZIP = False', 'CREATE_ZIP = True'), 'member-zip', 'exec'), context)
+    with zipfile.ZipFile(tmp_path / 'TV_tv1_MS2_RESULTS_test_full.zip') as bundle:
+        assert set(bundle.namelist()) == {'tv1/acceptance.json', 'tv1/result.txt'}
+
+
 def test_benchmark_uses_current_scope_and_measured_denominator(tmp_path):
     output = make_parsed_output(tmp_path)
     shutil.copytree(output / f'tables/{PAPER}', output / 'tables/2310.99999')

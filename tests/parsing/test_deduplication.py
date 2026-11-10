@@ -22,6 +22,14 @@ def entry(key, **fields):
     return dict(base, **fields)
 
 
+@pytest.mark.parametrize('entry_type', ['article', 'misc'])
+def test_note_only_reference_survives_bibtex_export(entry_type):
+    row = entry('note_only', entry_type=entry_type)
+    parsed, warnings = parse_bib_text(render_bibtex([row]))
+    assert warnings == []
+    assert parsed == [{k: v for k, v in row.items() if k != 'arxiv_id'}]
+
+
 # ------------------------------------------------------------------ level 1: the example of the statement
 def statement_entries():
     return [
