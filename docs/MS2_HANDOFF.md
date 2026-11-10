@@ -1,5 +1,33 @@
 # Bàn giao tích hợp MS2 — TV1 và các thành viên
 
+## Cách chạy phân tán theo thành viên
+
+Theo phân công mới, mỗi thành viên chạy [MS2_Integration_CPU.ipynb](../colab/MS2_Integration_CPU.ipynb)
+trên đúng data MS1 của mình. Chọn `MEMBER`, sửa `MS1_INPUT`, chạy SMOKE trước
+rồi FULL. Range đọc tự động từ config nhóm; FULL chọn đủ 5.000 ID để không bỏ
+sót discovery còn thiếu hoặc vô tình xử lý dải của người khác. Cùng dùng mã
+production cố định `b932d98eae90d50611004ccc5e2d91709a77b7bf`.
+
+| Thành viên | Dải lookup ID |
+| --- | --- |
+| TV1 | 2508.12872:2508.17871 |
+| TV2 | 2506.15788:2506.20787 |
+| TV3 | 2411.08799:2411.13798 |
+| TV4 | 2410.18025:2410.23024 |
+| TV5 | 2410.03025:2410.08024 |
+
+Output tách theo `RUN_TAG`, chế độ và thành viên; không có writer ghi manifest
+nhóm dùng chung. Sau FULL, bật `CREATE_ZIP` ở cell cuối để gửi ZIP cá nhân cho
+TV1/TV5. ZIP phải chứa đủ output, không chỉ log hoặc ba bảng. TV1 đối chiếu năm
+receipt, cùng code SHA, đúng range và các bài/version còn lỗi; TV5 xử lý thống
+kê và báo cáo. Không chép đè các manifest của từng người lên nhau. Các mục hướng
+dẫn chạy tập trung ở lịch sử bên dưới được thay bằng cách chọn thành viên này.
+
+Notebook phân tán đã qua 23 kiểm thử liên quan, gồm đủ năm dải phân công,
+thiếu discovery trong FULL, output/ZIP riêng từng người. Đã chạy SMOKE bằng
+cell mới trên bốn bài thật/sáu version của TV1/TV5, validation và resume qua,
+hash input không đổi. Chưa thực thi notebook trên dịch vụ Colab.
+
 ## Cập nhật 10/11/2026: nghiệm thu phần E
 
 Sáu module thật đã có trên `main` tại `b123a8f`, gồm sửa validator và benchmark
