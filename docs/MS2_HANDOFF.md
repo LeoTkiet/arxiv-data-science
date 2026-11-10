@@ -1,6 +1,69 @@
 # Bàn giao tích hợp MS2 — TV1 và các thành viên
 
-## Cập nhật 04/11/2026: chạy parsing trước, TV5 validation sau
+## Cập nhật 10/11/2026: nghiệm thu phần E
+
+Sáu module thật đã có trên `main` tại `b123a8f`, gồm sửa validator và benchmark
+của PR #19. TV1 tiếp tục phụ trách tích hợp; TV5 phụ trách QA, thống kê và viết
+báo cáo MS2. Không cần mock adapter để chạy pipeline hiện tại.
+
+Mẫu đầu vào được sao chép từ Drive, giữ nguyên byte và lưu provenance/SHA-256:
+
+| Nguồn | Paper | Version | Trường hợp |
+| --- | --- | --- | --- |
+| TV1 | 2508.17481 | v1, v2 | Nhiều file TeX, include, BibTeX và dedup xuyên version |
+| TV1 | 2508.17871 | v1, v2 | Mỗi version một file TeX và một `.bib`; có reference chỉ chứa ghi chú |
+| TV1 | 2508.17740 | v1 | PDF-only, download/extract xác nhận `no_source` |
+| TV5 | 2410.08024 | v1 | Hai file TeX và BibTeX, mẫu thật đã bàn giao trước |
+
+Lần thử phát hiện `render_bibtex` xuất entry không có field khi schema chuẩn hóa
+không giữ trường `note` của source. Tám entry như vậy ở 2508.17871 khiến TV5
+không đọc lại được. Đã sửa exporter TV4 để ghi `title = {}` cho entry không có
+field, giữ nguyên key và các giá trị rỗng; không điền dữ liệu suy đoán. Có tests
+đọc lại BibTeX và chạy đủ pipeline với source reference chỉ chứa ghi chú.
+
+Sau sửa, mẫu TV1 ba bài/năm version đã qua validation: 20 stage `success`, sáu
+stage `no_source`, không có validation error. Có 214 cảnh báo `bib_field_conflict`
+ở hai bài có source; đây là nội dung TV4/TV5 cần đối chiếu trước khi xác nhận
+chất lượng thư mục trích dẫn. Mẫu TV5 được chạy lại cùng bộ mã trong đợt nghiệm
+thu này; đọc receipt local bên dưới cho kết quả cuối và kiểm tra resume.
+
+Các đường dẫn local dưới đây tính từ repo gốc, không phải worktree và không
+được đưa corpus vào Git:
+
+- `artifacts/ms1-integration-sample-20261110/`: 48 file từ Drive và manifest
+  discovery gốc 5.000 bài, chỉ có source/checkpoint của ba bài TV1 đã chọn.
+- `artifacts/ms1-tv5-2410.08024-20261104/`: chín file mẫu TV5, manifest sáu bài.
+- `artifacts/ms2-e-acceptance-20261110/`: output theo thành viên, receipt nghiệm
+  thu, đo tài nguyên, validation, checkpoint, bảng và bằng chứng resume.
+
+Hai snapshot mẫu đều phải chạy bằng danh sách ID; không chạy mọi discovery
+record khi chỉ tải một phần source. Receipt và corpus local không có trên Git;
+người chạy lại cần bản sao dữ liệu hoặc truy cập Drive đã được nhóm bàn giao.
+
+### Chạy tiếp toàn corpus
+
+Dùng [MS2_Integration_CPU.ipynb](../colab/MS2_Integration_CPU.ipynb), chọn CPU,
+chốt SHA code và snapshot đã dừng ghi. Mỗi `JOBS` chứa một thành viên, input,
+output riêng, range và mẫu số phân công. Chạy mẫu trước; khi đủ snapshot thì đặt
+`ids=None`. Notebook kiểm tra ID thực tế so với range, ghi missing/out-of-range,
+tách kết quả source/empty/incomplete và giữ diagnostics theo stage.
+
+Giữ `summaries/parsing_summary.json` cho số đo lượt chạy, `summaries/parse-run.json`
+cho trạng thái trước resume, `summaries/resume-events.json` và `acceptance.json`
+cho kết quả nghiệm thu. Chạy resume không sửa dữ liệu MS1. Không cộng lại toàn bộ
+thư mục tables cũ để tính số liệu cho lượt chọn mới.
+
+TV1 xử lý Resolver/Orchestrator; TV2 xử lý cấu trúc cây; TV3 xử lý chuẩn hóa;
+TV4 xử lý reference/dedup/citation; TV5 xử lý validator, thống kê và báo cáo.
+Các cảnh báo BibTeX cần quyết định nội dung, không xóa cảnh báo để đạt nghiệm thu.
+
+E1 và phần chạy mẫu E2/E3 có bằng chứng local. **E4 và nghiệm thu toàn corpus
+của E5 chưa hoàn tất**: chưa chạy Colab CPU-only và chưa có receipt đủ năm
+thành viên. Audit MS1 TV1 bàn giao ngày 08/11 có 4.315/5.000 bài qua validator,
+685 bài chưa qua; phải kiểm tra download/extract của từng version để xác định
+lỗi nào chặn MS2. Lỗi metadata/references MS1 không tự động là lỗi source.
+
+## Lịch sử 04/11/2026: chạy parsing trước, TV5 validation sau
 
 Theo phân công của nhóm, TV5 phụ trách báo cáo MS2 và validator MS2. TV1 tiếp tục
 chuẩn bị snapshot, điều phối parsing, xuất bảng và xử lý lỗi tích hợp; không nhận

@@ -1,4 +1,22 @@
-# Notebook MS1 CPU-only
+# Notebook chạy trên CPU
+
+## Milestone 2: tích hợp và nghiệm thu
+
+Mở [MS2_Integration_CPU.ipynb](MS2_Integration_CPU.ipynb). Notebook dùng module
+thật của TV1–TV5, giữ MS1/MS2 ở hai root riêng, đo thời gian/RAM và thử resume.
+Mỗi thành viên có output riêng; khai báo `JOBS` theo snapshot đã bàn giao.
+Đường dẫn mặc định là ví dụ, phải sửa trước khi chạy. Dùng danh sách ID để thử
+mẫu; `ids=None` chọn mọi record. Kiểm tra `assignment_range` theo
+`configs/ms1_group6_ranges.json`, không dùng mẫu số 25.000 cho một thành viên.
+
+`acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
+cảnh báo. `group-acceptance.json` chỉ xác nhận đủ nhóm khi cả năm thành viên
+được kiểm tra đủ đúng ID được giao. Giữ các checkpoint, dependency hashes,
+tables, parsed và validation để TV5 kiểm tra lại. Thống kê đo lần đầu và sự kiện
+resume được lưu riêng; không dùng thời gian đọc cache làm tốc độ parsing mới.
+Notebook này chưa được thực thi trên Colab trong lần nghiệm thu local.
+
+## Milestone 1
 
 Mở `MS1_Benchmark_CPU.ipynb` trên Colab, chọn CPU, chạy setup thành công rồi chọn phạm vi. Source cố định tại commit đã đo/kiểm chứng `4ea44c42810f3bb1564080c19d1ed889f3498ee0`. Không tự đổi sang `main` hay bỏ qua test lỗi.
 
