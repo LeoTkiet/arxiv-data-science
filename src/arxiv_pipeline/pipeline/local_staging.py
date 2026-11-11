@@ -12,10 +12,10 @@ import zipfile
 
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
 from arxiv_pipeline.export.benchmark import (
-    MemorySampler, generate_parsing_summary, get_environment_info,
+    MemorySampler, generate_parsing_summary,
 )
 from arxiv_pipeline.main import expand_range
-from arxiv_pipeline.pipeline import parse
+from arxiv_pipeline.pipeline import parse, completion_index
 from arxiv_pipeline.pipeline.parse import _file_hash as _hash
 from arxiv_pipeline.reporting.milestone2.validation import safe_path
 
@@ -137,7 +137,7 @@ def _publish_archive(local_archive, destination):
     temporary.replace(destination)
 
 
-def _save_batch(local, output, papers, directory):
+def _save_batch(local, output, papers, directory, *, identity, completed):
     paper_files = {paper: sorted(_paper_files(local, paper)[0]) for paper in papers}
     name = utc_now().replace(':', '-') + '-' + uuid4().hex
     archive = directory / 'checkpoint.zip'
@@ -146,12 +146,43 @@ def _save_batch(local, output, papers, directory):
             bundle.write(safe_path(local, relative), relative)
     relative = f'local-batches/{name}.zip'
     receipt = dict(format='ms2-local-batch-1', archive=relative,
-                   sha256=_hash(archive), paper_files=paper_files)
+                   sha256=_hash(archive), paper_files=paper_files,
+                   context=identity, completed=completed)
     _publish_archive(archive, safe_path(output, relative))
     # The receipt commits the archive. An interrupted .partial/uncommitted ZIP
     # cannot be mistaken for a completed checkpoint batch.
     atomic_json(output / 'local-batches' / f'{name}.json', receipt)
     return receipt
+
+
+def _discovery_index(source, output, destination, workspace, identity, workers):
+    cache_identity = {k: identity[k] for k in ('source', 'snapshot_id')}
+    cached = parse._read(safe_path(output, 'resume-discovery.json'), cache=True)
+    archive = workspace / 'discovery.zip'
+    if isinstance(cached, dict) and cached.get('context') == cache_identity:
+        shutil.copyfile(safe_path(output, cached['archive']), archive)
+        if _hash(archive) == cached['sha256']:
+            with zipfile.ZipFile(archive) as bundle:
+                for member in bundle.infolist():
+                    target = safe_path(destination, member.filename)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with bundle.open(member) as src, target.open('wb') as dst:
+                        shutil.copyfileobj(src, dst)
+            print('Discovery restored from one compact archive', flush=True)
+            return
+        print('Discovery cache checksum changed; rebuilding from the frozen snapshot', flush=True)
+    checkpoints = safe_path(source, 'state/discovery')
+    files = {p.relative_to(source).as_posix() for p in checkpoints.glob('*.json')}
+    if not files and safe_path(source, 'manifests/discovery.json').is_file():
+        files.add('manifests/discovery.json')
+    _copy_files(source, destination, files, set(), workers)
+    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
+        for relative in sorted(files):
+            bundle.write(safe_path(destination, relative), relative)
+    relative = f'discovery-cache/{uuid4().hex}.zip'
+    _publish_archive(archive, safe_path(output, relative))
+    atomic_json(output / 'resume-discovery.json',
+                dict(context=cache_identity, archive=relative, sha256=_hash(archive)))
 
 
 def _merge_summary(parts, total, input_errors):
@@ -178,6 +209,8 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
     The caller must stop other writers on the selected input and output roots.
     """
     source, output = parse.validate_roots(job['input'], output)
+    previous_config = parse._read(safe_path(output, 'acceptance-config.json'), cache=True)
+    identity = completion_index.context(source, job)
     local_root = Path(local_root).resolve()
     for boundary in (source, output):
         if local_root.is_relative_to(boundary) or boundary.is_relative_to(local_root):
@@ -200,16 +233,17 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
         member=job['member'], code_sha=code_sha, complete=False,
         full_assignment_accepted=False, status='running'))
     config = dict(job=job, code_sha=code_sha, resume=True, frozen_input=True,
-                  storage_mode='colab-local-batches', copy_workers=workers, batch_size=batch_size)
+                  storage_mode='colab-local-batches', copy_workers=workers, batch_size=batch_size,
+                  processing_revision=identity['processing_revision'])
     atomic_json(output / 'acceptance-config.json', config)
     atomic_json(output / 'delivery.json', dict(status='running', code_sha=code_sha))
     started = perf_counter()
     print(f'Reading discovery for {len(identifiers)} IDs', flush=True)
     journal = _load_journal(output)
-    parts, all_stages, metrics, issues = [], [], [], []
+    parts, all_stages, issues = [], [], []
     resume_events = []
     resume_ok = True
-    cached_stages = total_stages = export_bytes = 0
+    cached_stages = total_stages = 0
     with TemporaryDirectory(prefix='ms2-run-', dir=local_root) as temporary:
         workspace = Path(temporary)
         local = workspace / 'output'
@@ -217,34 +251,32 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
         with MemorySampler() as sampler:
             discovery_root = workspace / 'discovery'
             discovery_root.mkdir()
-            checkpoints = safe_path(source, 'state/discovery')
-            discovery_files = {p.relative_to(source).as_posix()
-                               for p in checkpoints.glob('*.json')}
-            if not discovery_files and safe_path(source, 'manifests/discovery.json').is_file():
-                discovery_files.add('manifests/discovery.json')
-            _copy_files(source, discovery_root, discovery_files, set(), workers)
+            _discovery_index(source, output, discovery_root, workspace, identity, workers)
             records, input_errors, _ = parse._discover(discovery_root, identifiers)
-            for offset in range(0, len(records), batch_size):
-                batch = records[offset:offset + batch_size]
+            completed = completion_index.load(
+                output, identity, records, journal, previous_config, workspace, workers)
+            skipped = [r['arxiv_id'] for r, _, conflict in records
+                       if not conflict and r['arxiv_id'] in completed]
+            pending = [(r, p, c) for r, p, c in records if c or r['arxiv_id'] not in completed]
+            completion_index.save(output, identity, completed, origin=previous_config)
+            if skipped:
+                parts.append(dict(paper_results=[completed[p]['outcome'] for p in skipped],
+                                  excluded_inputs=[], stage_statuses={}))
+            print(f'{len(skipped)} completed papers skipped | {len(pending)} IDs pending', flush=True)
+            for offset in range(0, len(pending), batch_size):
+                batch = pending[offset:offset + batch_size]
                 papers = [r['arxiv_id'] for r, _, _ in batch]
                 batch_started = perf_counter()
                 with TemporaryDirectory(prefix='input-', dir=workspace) as batch_dir:
                     staged = Path(batch_dir)
-                    print(f'{offset}/{len(records)} IDs | copying {len(batch)} papers with {workers} workers', flush=True)
+                    print(f'{len(skipped) + offset}/{len(records)} IDs | copying {len(batch)} pending papers with {workers} workers', flush=True)
                     _stage_inputs(source, staged, batch, workers, discovery_root=discovery_root)
                     _restore(output, local, papers, journal, workers)
                     events = []
                     summary = parse.run(
                         papers, local, input_root=staged, resume=True,
                         frozen_input=True, observer=events.append)
-                    batch_metrics = generate_parsing_summary(
-                        local, wall_time_sec=0, peak_ram_mb=0, avg_ram_mb=0,
-                        total_assigned=job['total_assigned'])
                     stages = json.loads((local / 'manifests/stages.json').read_text(encoding='utf-8'))
-                    for outcome in summary['paper_results']:
-                        if outcome['complete']:
-                            export_bytes += sum(safe_path(local, relative).stat().st_size
-                                                for relative in set(outcome['artifacts'].values()))
                     for stage in stages:
                         if stage['status'] not in parse.TERMINAL:
                             issues.append(dict(stage=stage['stage'], paper_id=stage['paper_id'],
@@ -263,13 +295,27 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
                                          and all(event['cached'] for event in verified_events))
                         resume_events.extend(verified_events)
                     receipt = None
+                    certified = {}
+                    by_id = {r['arxiv_id']: r for r, _, _ in batch}
+                    for outcome in summary['paper_results']:
+                        if outcome['complete']:
+                            paper = outcome['arxiv_id']
+                            manifest = parse._read(safe_path(local, outcome['artifacts']['parsing_manifest']))
+                            report = parse._read(safe_path(local, f'validation/parsing/{paper_key(paper)}.json'))
+                            entry = completion_index._certificate(by_id[paper], outcome, manifest, report)
+                            if entry:
+                                certified[paper] = entry
                     if not (all(e['cached'] for e in events) and all(p in journal for p in papers)):
-                        receipt = _save_batch(local, output, papers, staged)
+                        receipt = _save_batch(local, output, papers, staged,
+                                              identity=identity, completed=certified)
                 if receipt is not None:
                     for paper in papers:
                         journal[paper] = receipt
+                for paper in papers:
+                    completed.pop(paper, None)
+                completed.update(certified)
+                completion_index.save(output, identity, completed)
                 parts.append(summary)
-                metrics.append(batch_metrics)
                 all_stages.extend(stages)
                 cached_stages += sum(e['cached'] for e in events)
                 total_stages += len(events)
@@ -280,23 +326,23 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
                       f"{sum(e['cached'] for e in events)}/{len(events)} stages cached", flush=True)
             peak, average, _ = sampler.stop()
 
+        # Only after pending IDs are handled, read previous output for the final
+        # complete handoff ZIP. No MS1 input of a skipped paper is copied.
+        for offset in range(0, len(skipped), batch_size):
+            papers = skipped[offset:offset + batch_size]
+            print(f'Final export: collecting completed output {offset + len(papers)}/{len(skipped)}', flush=True)
+            _restore(output, local, papers, journal, workers)
+            for paper in papers:
+                for stage in parse.MODULES:
+                    for checkpoint in safe_path(local, f'state/stages/{stage}/{paper_key(paper)}').glob('*.json'):
+                        if not checkpoint.name.endswith('.dependencies.json'):
+                            all_stages.append(parse._read(checkpoint))
+                report = parse._read(safe_path(local, f'validation/parsing/{paper_key(paper)}.json'))
+                issues.extend(dict(stage='validate_parse', **issue)
+                              for issue in report['errors'] + report['warnings'])
         merged = _merge_summary(parts, len(identifiers), input_errors)
-        coverage = Counter()
-        dedup = Counter()
-        for metric in metrics:
-            coverage.update({k: v for k, v in metric['coverage_statistics'].items()
-                             if k not in {'total_assigned_publications', 'parsing_success_rate_pct'}})
-            dedup.update({k: v for k, v in metric['deduplication_statistics'].items()
-                          if not k.endswith('_pct')})
-        coverage['total_assigned_publications'] = job['total_assigned']
-        coverage['parsing_success_rate_pct'] = round(
-            100 * coverage['successfully_parsed_publications'] / job['total_assigned'], 2)
-        for label, before, after in (
-            ('element', 'elements_before_dedup', 'elements_after_dedup'),
-            ('bibtex', 'bibtex_entries_before_dedup', 'bibtex_entries_after_dedup'),
-        ):
-            dedup[label + '_dedup_reduction_pct'] = round(
-                100 * (dedup[before] - dedup[after]) / dedup[before], 2) if dedup[before] else 0.0
+        merged['stage_statuses'] = dict(Counter(s['status'] for s in all_stages))
+        merged['skipped_completed_papers'] = len(skipped)
         accounted = {p['arxiv_id'] for p in merged['paper_results']
                      if p.get('reason') != 'MS1 discovery record is missing'}
         accounted.update(p.get('arxiv_id') or p.get('input_id') for p in merged['excluded_inputs'])
@@ -309,9 +355,10 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
             paper_statuses=dict(Counter(p['status'] for p in merged['paper_results'])),
             version_statuses=dict(Counter(v['status'] for p in merged['paper_results'] for v in p['versions'])),
             incomplete_papers=[p['arxiv_id'] for p in merged['paper_results'] if not p['complete']],
-            resume_enabled=True, resume_all_cached=resume_ok if check_resume else None,
+            resume_enabled=True, resume_all_cached=resume_ok if check_resume and resume_events else None,
             cached_stages=cached_stages,
             total_stages=total_stages, issues=issues, storage_mode='colab-local-batches',
+            skipped_completed_papers=len(skipped),
             full_assignment_accepted=bool(job['ids'] is None and merged['complete'] and accounted == assigned),
         )
         atomic_json(local / 'parsing_summary.json', merged)
@@ -322,16 +369,14 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
             atomic_json(local / 'summaries/resume-events.json', resume_events)
         atomic_json(local / 'acceptance-config.json', config)
         atomic_json(local / 'acceptance.json', acceptance)
-        measured = perf_counter() - started
-        benchmark = dict(
-            environment=get_environment_info(), coverage_statistics=dict(coverage),
-            deduplication_statistics=dict(dedup),
-            performance_metrics=dict(
-                end_to_end_wall_time_sec=round(measured, 2),
-                avg_time_per_publication_sec=round(measured / merged['papers'], 4) if merged['papers'] else 0.0,
-                peak_ram_mb=peak, avg_ram_mb=average, final_output_storage_mb=round(export_bytes / (1024 ** 2), 2)),
-            measurement_scope='discovery, input copy, local parse/QA, checkpoint restore and batch uploads; final export measured separately',
-        )
+        # Recompute totals from the complete local handoff, including skipped
+        # papers, without loading their source archives.
+        aggregate = generate_parsing_summary(
+            local, wall_time_sec=perf_counter() - started, peak_ram_mb=peak,
+            avg_ram_mb=average, total_assigned=job['total_assigned'])
+        benchmark = aggregate
+        benchmark['measurement_scope'] = 'discovery, pending processing and previous output collection; ZIP export measured separately'
+        benchmark['ram_measurement_scope'] = 'discovery and pending processing'
         atomic_json(local / 'summaries/parsing_summary.json', benchmark)
         archive = workspace / 'results.zip'
         export_started = perf_counter()
