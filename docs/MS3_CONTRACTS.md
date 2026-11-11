@@ -1,13 +1,15 @@
 # Hợp đồng dữ liệu và giao tiếp Milestone 3
 
-Ngày: 11/11/2026. Phiên bản đề xuất: `3.0-draft.1`.
-Trạng thái: chờ TV2–TV5 review; chưa khóa G0, chưa triển khai API bên dưới.
+Ngày: 11/11/2026. Phiên bản đã chốt: `3.0`.
+Trạng thái: nhóm đã chốt contract theo xác nhận của người dùng. Đã triển khai
+schema, validators và compatibility fixtures; API nghiệp vụ/pipeline ở mục 6
+là giao diện bàn giao cho các task tiếp theo, chưa phải pipeline M3 đã chạy được.
 TV1 sở hữu contract; TV5 review tích hợp. Thay đổi phá tương thích phải cập nhật
 phiên bản và thông báo cho tất cả consumer trước khi merge.
 
 Nguồn phân công: [TV1 trên Notion](https://app.notion.com/p/4159cc1ed390819399f3ef11bac38e7c).
 Nguồn nghiệm thu: [đề MS3 chính thức](https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/matching/).
-Các lựa chọn API, artifact và xử lý lỗi dưới đây là đề xuất kỹ thuật của TV1.
+Các lựa chọn API, artifact và xử lý lỗi dưới đây là contract nhóm đã thống nhất.
 
 ## 1. Điểm cần sửa trong kế hoạch
 
@@ -26,8 +28,7 @@ pool. Ghi rõ danh sách và cách tính mẫu số. Dữ liệu chưa parse xon
 thiếu; không tự thu nhỏ N theo số bài đang sẵn sàng. Nếu chưa đủ bài cho split,
 báo chưa đủ điều kiện, không giảm quota để chạy nghiệm thu.
 
-Các trang Notion đang ghi mức 5 manual publications/100 entries cho cả nhóm và
-1 manual + 1 auto cho từng tập cần cập nhật theo các mức trên.
+Đã cập nhật kế hoạch Notion và các task liên quan theo quota nhóm 5 người.
 
 ## 2. Đầu vào M1/M2 và phạm vi triển khai
 
@@ -214,10 +215,10 @@ trong mẫu số. Tập query rỗng báo lỗi, không công bố MRR=0 cho t�
 Ví dụ hai query test: một query có đáp án ở hạng 2, query còn lại unmatched,
 MRR@5 = (1/2 + 0)/2 = 0.25. Đây là ví dụ giả lập, không phải kết quả thực nghiệm.
 
-Đề xuất predictions phủ mọi BibTeX entry của publication trong split. Entry
+Predictions phủ mọi BibTeX entry của publication trong split. Entry
 chưa được gán nhãn vẫn được rank, groundtruth null; bảng labels nội bộ phân
 biệt nó với unmatched. Evaluator chỉ chọn query có nhãn hợp lệ, không suy nhãn
-từ null trong predictions. Nhóm cần xác nhận quy tắc coverage này ở G0.
+từ null trong predictions.
 
 Predictions export chỉ có các cột RankedPrediction, partition dùng dictionary
 encoding; provenance đặt ở sidecar. Các bảng công bố giữ cột phẳng, primitive
@@ -226,7 +227,7 @@ và đọc lại Parquet trước bàn giao.
 
 ## 8. Artifact, lỗi và khả năng chạy lại
 
-Header manifest M3: `schema_version="3.0-draft.1"`, `run_id`, `source_version`
+Header manifest M3: `schema_version="3.0"`, `run_id`, `source_version`
 (Git commit của code), `ms1_snapshot_id`, `ms2_snapshot_id`, `seed`, config hash,
 module versions, feature_schema_id, label_snapshot_id và split_id khi đã có.
 `source_version` khác phiên bản LaTeX. Artifact cấp publication có arxiv_id;
@@ -276,15 +277,15 @@ Lỗi một publication được ghi riêng và tiếp tục thu thập lỗi c�
 Nếu bài đã thuộc split cố định bị lỗi, run phải incomplete; không tự bỏ bài đó
 khỏi test/train hoặc đổi split để báo thành công. Không xuất bản khi còn lỗi chặn.
 
-## 9. Bàn giao để khóa G0
+## 9. Bàn giao contract 3.0
 
 | Người review | Nội dung cần xác nhận | Trạng thái |
 | --- | --- | --- |
-| TV2 | Candidate keys, ReferenceInput thiếu DOI, feature schema, transformer train-only | Chờ |
-| TV3 | Quy tắc uncertain/unmatched, label provenance, quota cập nhật | Chờ |
-| TV4 | FeatureBatch, targets, score có khóa, model/transformer artifact | Chờ |
-| TV5 | Split theo nhóm 5 người, coverage predictions, MRR và export | Chờ |
-| TV1 | Mapping input M1/M2, readiness, paths, schema version, orchestration | Đã soạn đề xuất |
+| TV2 | Candidate keys, ReferenceInput thiếu DOI, feature schema, transformer train-only | Nhóm đã chốt theo xác nhận người dùng |
+| TV3 | Quy tắc uncertain/unmatched, label provenance, quota cập nhật | Nhóm đã chốt theo xác nhận người dùng |
+| TV4 | FeatureBatch, targets, score có khóa, model/transformer artifact | Nhóm đã chốt theo xác nhận người dùng |
+| TV5 | Split theo nhóm 5 người, coverage predictions, MRR và export | Nhóm đã chốt theo xác nhận người dùng |
+| TV1 | Mapping input M1/M2, readiness, paths, schema version, orchestration | Đã triển khai phần schema/validators/fixtures |
 
 Fixture contract cần ít nhất ba publications giả lập: exact match, ambiguous
 title, unmatched. Bổ sung case references rỗng, query thiếu nhãn, duplicate ID,
@@ -292,9 +293,40 @@ cùng citation_key ở hai publications, ID legacy và versioned ID. Fixture ph�
 được đánh dấu synthetic; ba bài này chỉ kiểm giao tiếp, không đáp ứng quota
 manual/auto hoặc split nghiệm thu.
 
-G0 chỉ khóa sau khi có xác nhận TV2–TV5 và giải quyết các ý kiến trái nhau.
-Sau đó TV1 tạo `matching/contracts.py`, fixture và contract validators theo bản
-đã duyệt; đây là bước triển khai kế tiếp, chưa được thực hiện trong tài liệu này.
+Đầu ra đã triển khai:
 
-Changelog: `3.0-draft.1` (11/11/2026), bản đề xuất đầu tiên dựa trên code local
-và phân công Notion; bổ sung điều chỉnh quota từ đề chính thức.
+- `common/schemas.py`: thêm MATCHING_SCHEMA_VERSION=3.0; giữ default M1=1.0,
+  parsing=2.0. BibtexInput dùng lại chính BibtexRow của M2.
+- `matching/contracts.py`: ReferenceInput, PublicationBundle, Issue, LabelRecord,
+  PairFeature, FeatureSpec/Schema/Batch, ScoreRecord, RankedPrediction,
+  PartitionRow/Manifest, ValidationReport và typed key aliases.
+- Boundary in-memory `publication_from_rows()` chuẩn hóa ID, kiểm M1/M2 rows,
+  ghi cảnh báo dữ liệu thiếu, gom reference trùng nhất quán và chặn xung đột.
+- Validators: `validate_labels`, `validate_features`, `validate_scores`,
+  `validate_predictions`, `validate_split_quotas`. Constructors chặn sai kiểu/
+  giá trị cục bộ bằng ContractError; validators trả ValidationReport cho lỗi
+  quan hệ giữa các hàng. Input cấu hình sai/empty không có publication để gắn
+  lỗi có thể raise ContractError. Chỉ dùng kết quả khi report.valid là true.
+- `tests/fixtures/matching/examples.py`: dữ liệu synthetic tái lập, snapshot
+  writer không ghi đè thư mục cũ. Chi tiết tại README trong cùng thư mục.
+- `tests/matching/test_contracts.py`: kiểm tương thích serializer M1 thật,
+  schema M2, checkpoint versions và các trường hợp dữ liệu biên.
+
+PairFeature.values là mapping nội bộ để TV2 đăng ký đặc trưng; to_dict() xuất
+các cột phẳng. FeatureSpec quy định thứ tự/dtype/range/nullability và nguồn;
+feature schema ID thay đổi khi thứ tự cột hoặc đặc tả đổi. PartitionManifest
+tính counts và split_id từ nội dung, không nhận số liệu tự khai làm bằng chứng.
+validate_split_quotas kiểm quota publication; quota entries/annotator vẫn cần
+audit nhãn thật của TV3. Fixture 25 manual +12 auto chỉ thử chia tập, không
+phải bằng chứng đã gán nhãn 500 entries.
+
+Chưa triển khai trong task này: loader file/checkpoint `matching/io.py`, cleaning,
+candidate generation, feature transformer/model artifacts, train/rank/evaluate/
+export nghiệp vụ, orchestration/CLI/resume. Không thay các integration slots
+bằng success giả. Quy định path, snapshot readiness và resume ở trên sẽ được
+áp dụng khi triển khai loader/orchestrator.
+
+Chạy từ repo root: `python -m pytest tests/matching/test_contracts.py -q`.
+
+Changelog: `3.0` (11/11/2026), nhóm chốt; triển khai schema/validators/fixtures.
+`3.0-draft.1` (11/11/2026), bản đề xuất đầu tiên và điều chỉnh quota theo đề.

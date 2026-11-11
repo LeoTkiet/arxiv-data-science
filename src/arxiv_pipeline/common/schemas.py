@@ -1,4 +1,4 @@
-"""MS1 contract 1.0 and MS2 table rows; MS2 opts into version 2.0 explicitly."""
+"""Shared table rows; stages explicitly opt into MS1 1.0, MS2 2.0 or M3 3.0."""
 
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -6,6 +6,8 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 # Independent from MS1 checkpoints: opt in explicitly for parsing artifacts/results.
 PARSING_SCHEMA_VERSION = "2.0"
+# M3 opts in explicitly; never change the default schema of M1/M2 checkpoints.
+MATCHING_SCHEMA_VERSION = "3.0"
 DISCOVERY_STATUSES = {"success", "invalid_id", "not_found", "api_error", "data_error"}
 STAGE_STATUSES = {"success", "no_source", "not_indexed", "no_data", "api_error",
                   "data_error", "error", "not_implemented", "skipped"}

@@ -201,3 +201,19 @@ bị ngắt. Chi tiết envelope và artifact xem [hợp đồng MS2](docs/MS2_C
 ```powershell
 python -m pytest tests/pipeline/test_parse.py tests/pipeline/test_cli.py -q
 ```
+
+## Milestone 3: data contracts 3.0
+
+Contract nhóm đã chốt nằm ở [docs/MS3_CONTRACTS.md](docs/MS3_CONTRACTS.md).
+Các module M3 dùng records/validators trong `arxiv_pipeline.matching.contracts`;
+`BibtexInput` dùng lại `BibtexRow` M2. Checkpoint M3 phải truyền tường minh
+`schema_version=MATCHING_SCHEMA_VERSION`; default M1/M2 giữ nguyên.
+
+[Compatibility fixtures](tests/fixtures/matching/README.md) có exact, ambiguous,
+unmatched, empty references và split mock cho nhóm 5 người. Không dùng dữ liệu
+synthetic làm bằng chứng nghiệm thu. Task này cung cấp schema/validators/fixtures;
+loader snapshot và pipeline matching end-to-end chưa triển khai.
+
+```powershell
+python -m pytest tests/matching/test_contracts.py -q
+```
