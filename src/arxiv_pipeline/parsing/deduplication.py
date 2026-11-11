@@ -151,6 +151,10 @@ def render_bibtex(rows) -> str:
                             ("year", row["year"]), ("doi", row["doi"]), ("journal", row["journal"]), ("url", row["url"])):
             if not _empty(text):
                 lines.append(f"  {field} = {{{value(text)}}}")
+        if not lines:
+            # Note-only source references can have no fields in the table schema.
+            # An explicit empty title preserves the key and remains parseable.
+            lines.append("  title = {}")
         chunks.append(f"@{row['entry_type']}{{{row['citation_key']},\n" + ",\n".join(lines) + "\n}\n")
     return "\n".join(chunks)
 

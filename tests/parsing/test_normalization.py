@@ -614,3 +614,257 @@ def test_literal_markers_survive_alongside_nested_math(literal):
     cleaned = clean_latex_formatting(raw)
     assert cleaned == raw
     assert split_into_sentences(cleaned) == [literal + " " + math + ".", "Next sentence."]
+
+
+# -----------------------------------------------------------------------------
+# 8. TV3 Regression Tests: Color wrappers, maketitle, and presentational commands
+# -----------------------------------------------------------------------------
+
+def test_clean_latex_formatting_strips_maketitle():
+    # Standalone maketitle, maketitle{}, and maketitle with trailing prose
+    text1 = r"\maketitle"
+    assert clean_latex_formatting(text1) == ""
+
+    text2 = r"\maketitle{} Here begins the actual paper."
+    assert clean_latex_formatting(text2) == "Here begins the actual paper."
+
+    text3 = r"\maketitle \noindent In this work we study neural networks."
+    assert clean_latex_formatting(text3) == "In this work we study neural networks."
+
+
+def test_clean_latex_formatting_unwraps_textcolor_rgb():
+    # Exact snippet reported in review on paper 2411.13795
+    text = r"\textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}} Modern physics studies quantum phenomena."
+    cleaned = clean_latex_formatting(text)
+    assert r"\textcolor" not in cleaned
+    assert r"[rgb]" not in cleaned
+    assert r"\textbf" not in cleaned
+    assert cleaned == "Introduction.--- Modern physics studies quantum phenomena."
+
+
+def test_clean_latex_formatting_unwraps_nested_color_and_text_styles():
+    # Both directions of nesting: color inside textbf, and textbf inside color
+    text1 = r"\textbf{\textcolor[rgb]{0.00,0.00,1.00}{Important Heading}}"
+    assert clean_latex_formatting(text1) == "Important Heading"
+
+    text2 = r"\textcolor{blue}{\textit{Emphasized blue text}}"
+    assert clean_latex_formatting(text2) == "Emphasized blue text"
+
+    # Multi-level nesting
+    text3 = r"\textcolor{red}{\textbf{\textit{\textcolor{green}{Deeply nested text}}}}"
+    assert clean_latex_formatting(text3) == "Deeply nested text"
+
+
+def test_clean_latex_formatting_preserves_math_and_citations_inside_textcolor():
+    # Math derivatives and citations inside \textcolor must survive cleanly
+    text = (
+        r"\textcolor[rgb]{0.00,0.00,1.00}{"
+        r"Given $f''(x) = 0$ and \cite{vaswani2017}, the function is linear."
+        r"}"
+    )
+    cleaned = clean_latex_formatting(text)
+    assert r"\textcolor" not in cleaned
+    assert r"$f''(x) = 0$" in cleaned
+    assert r"\cite{vaswani2017}" in cleaned
+    assert cleaned == r"Given $f''(x) = 0$ and \cite{vaswani2017}, the function is linear."
+
+
+def test_clean_latex_formatting_color_boxes_and_declarations():
+    # \colorbox and \fcolorbox
+    text1 = r"We use \colorbox{yellow}{highlighted text} and \fcolorbox{red}{yellow}{boxed text}."
+    assert clean_latex_formatting(text1) == "We use highlighted text and boxed text."
+
+    # Declarative \color switches and \normalcolor
+    text2 = r"{\color[rgb]{0.00,0.00,1.00} Blue text} followed by \normalcolor normal text."
+    assert clean_latex_formatting(text2) == "{ Blue text} followed by normal text."
+
+
+def test_transform_tree_removes_presentation_from_headings_and_prose():
+    # Full tree transformation verifying both heading and prose nodes lose \maketitle and \textcolor
+    raw_nodes = [
+        {"temp_id": "root", "parent_temp_id": None, "position": 0, "kind": "document", "raw_content": ""},
+        {
+            "temp_id": "h1",
+            "parent_temp_id": "root",
+            "position": 0,
+            "kind": "heading",
+            "heading_rank": 3,
+            "raw_content": r"\noindent\textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}}",
+        },
+        {
+            "temp_id": "p1",
+            "parent_temp_id": "h1",
+            "position": 0,
+            "kind": "prose_block",
+            "raw_content": r"\maketitle First sentence of the paper. \textcolor{blue}{Second sentence here.}",
+        },
+    ]
+
+    normalized = transform_tree_to_normalized(raw_nodes)
+
+    # 1 root + 1 heading + 2 sentences
+    assert len(normalized) == 4
+    heading = normalized[1]
+    assert heading["kind"] == "heading"
+    assert heading["cleaned_content"] == "Introduction.---"
+    assert r"\textcolor" not in heading["cleaned_content"]
+    assert r"\textbf" not in heading["cleaned_content"]
+
+    s1 = normalized[2]
+    assert s1["kind"] == "sentence"
+    assert s1["cleaned_content"] == "First sentence of the paper."
+    assert r"\maketitle" not in s1["cleaned_content"]
+
+    s2 = normalized[3]
+    assert s2["kind"] == "sentence"
+    assert s2["cleaned_content"] == "Second sentence here."
+    assert r"\textcolor" not in s2["cleaned_content"]
+
+
+# -----------------------------------------------------------------------------
+# 8. TV3 Regression Tests: Color wrappers, maketitle, and presentational commands
+# -----------------------------------------------------------------------------
+
+def test_clean_latex_formatting_strips_maketitle():
+    # Standalone maketitle, maketitle{}, and maketitle with trailing prose
+    text1 = r"\maketitle"
+    assert clean_latex_formatting(text1) == ""
+
+    text2 = r"\maketitle{} Here begins the actual paper."
+    assert clean_latex_formatting(text2) == "Here begins the actual paper."
+
+    text3 = r"\maketitle \noindent In this work we study neural networks."
+    assert clean_latex_formatting(text3) == "In this work we study neural networks."
+
+
+def test_clean_latex_formatting_unwraps_textcolor_rgb():
+    # Exact snippet reported in review on paper 2411.13795
+    text = r"\textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}} Modern physics studies quantum phenomena."
+    cleaned = clean_latex_formatting(text)
+    assert r"\textcolor" not in cleaned
+    assert r"[rgb]" not in cleaned
+    assert r"\textbf" not in cleaned
+    assert cleaned == "Introduction.--- Modern physics studies quantum phenomena."
+
+
+def test_clean_latex_formatting_unwraps_nested_color_and_text_styles():
+    # Both directions of nesting: color inside textbf, and textbf inside color
+    text1 = r"\textbf{\textcolor[rgb]{0.00,0.00,1.00}{Important Heading}}"
+    assert clean_latex_formatting(text1) == "Important Heading"
+
+    text2 = r"\textcolor{blue}{\textit{Emphasized blue text}}"
+    assert clean_latex_formatting(text2) == "Emphasized blue text"
+
+    # Multi-level nesting
+    text3 = r"\textcolor{red}{\textbf{\textit{\textcolor{green}{Deeply nested text}}}}"
+    assert clean_latex_formatting(text3) == "Deeply nested text"
+
+
+def test_clean_latex_formatting_preserves_math_and_citations_inside_textcolor():
+    # Math derivatives and citations inside \textcolor must survive cleanly
+    text = (
+        r"\textcolor[rgb]{0.00,0.00,1.00}{"
+        r"Given $f''(x) = 0$ and \cite{vaswani2017}, the function is linear."
+        r"}"
+    )
+    cleaned = clean_latex_formatting(text)
+    assert r"\textcolor" not in cleaned
+    assert r"$f''(x) = 0$" in cleaned
+    assert r"\cite{vaswani2017}" in cleaned
+    assert cleaned == r"Given $f''(x) = 0$ and \cite{vaswani2017}, the function is linear."
+
+
+def test_clean_latex_formatting_color_boxes_and_declarations():
+    # \colorbox and \fcolorbox
+    text1 = r"We use \colorbox{yellow}{highlighted text} and \fcolorbox{red}{yellow}{boxed text}."
+    assert clean_latex_formatting(text1) == "We use highlighted text and boxed text."
+
+    # Declarative \color switches and \normalcolor
+    text2 = r"{\color[rgb]{0.00,0.00,1.00} Blue text} followed by \normalcolor normal text."
+    assert clean_latex_formatting(text2) == "{ Blue text} followed by normal text."
+
+
+def test_transform_tree_removes_presentation_from_headings_and_prose():
+    # Full tree transformation verifying both heading and prose nodes lose \maketitle and \textcolor
+    raw_nodes = [
+        {"temp_id": "root", "parent_temp_id": None, "position": 0, "kind": "document", "raw_content": ""},
+        {
+            "temp_id": "h1",
+            "parent_temp_id": "root",
+            "position": 0,
+            "kind": "heading",
+            "heading_rank": 3,
+            "raw_content": r"\noindent\textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}}",
+        },
+        {
+            "temp_id": "p1",
+            "parent_temp_id": "h1",
+            "position": 0,
+            "kind": "prose_block",
+            "raw_content": r"\maketitle First sentence of the paper. \textcolor{blue}{Second sentence here.}",
+        },
+    ]
+
+    normalized = transform_tree_to_normalized(raw_nodes)
+
+    # 1 root + 1 heading + 2 sentences
+    assert len(normalized) == 4
+    heading = normalized[1]
+    assert heading["kind"] == "heading"
+    assert heading["cleaned_content"] == "Introduction.---"
+    assert r"\textcolor" not in heading["cleaned_content"]
+    assert r"\textbf" not in heading["cleaned_content"]
+
+    s1 = normalized[2]
+    assert s1["kind"] == "sentence"
+    assert s1["cleaned_content"] == "First sentence of the paper."
+    assert r"\maketitle" not in s1["cleaned_content"]
+
+    s2 = normalized[3]
+    assert s2["kind"] == "sentence"
+    assert s2["cleaned_content"] == "Second sentence here."
+    assert r"\textcolor" not in s2["cleaned_content"]
+
+
+def test_end_to_end_tv2_to_tv3_to_tv4_integration():
+    from arxiv_pipeline.parsing.hierarchy import build_hierarchy_tree
+    from arxiv_pipeline.parsing.deduplication import deduplicate_elements_and_build_hierarchy
+
+    tex = (
+        r"\begin{document}" "\n"
+        r"\maketitle" "\n"
+        r"\section{\textcolor[rgb]{0.00,0.00,1.00}{\textbf{Introduction.---}}}" "\n"
+        r"This is the first paragraph with \textcolor{blue}{colored text}." "\n"
+        r"\end{document}"
+    )
+    raw_nodes = build_hierarchy_tree(1, tex)
+    raw_dicts = [
+        {
+            "temp_id": n.temp_id,
+            "parent_temp_id": n.parent_temp_id,
+            "position": n.position,
+            "kind": n.kind,
+            "raw_content": n.raw_content,
+            "level": n.level,
+            "heading_rank": n.heading_rank,
+        }
+        for n in raw_nodes
+    ]
+    norm_nodes = transform_tree_to_normalized(raw_dicts)
+
+    elements, hierarchy, occurrences, unknown = deduplicate_elements_and_build_hierarchy(
+        "2411.13795", [(1, norm_nodes)]
+    )
+    assert len(elements) == 4
+    for el in elements:
+        assert r"\textcolor" not in el["content"]
+        assert r"\maketitle" not in el["content"]
+
+    # Verify heading element content is stripped of presentational wrappers
+    heading_el = next(el for el in elements if el["kind"] == "heading")
+    assert heading_el["content"] == r"\section{Introduction.---}"
+
+    assert len(hierarchy) == 3
+    assert len(occurrences[1]) == 4
+
+

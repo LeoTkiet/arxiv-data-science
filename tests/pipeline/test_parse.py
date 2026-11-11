@@ -168,6 +168,32 @@ class ParseTests(TestCase):
         self.assertEqual([v for s, _, v in self.calls if s == 'resolve'], [3])
         self.assertIn(('deduplicate', None), self.counted())
 
+    def test_frozen_input_reads_each_raw_archive_once_and_still_checks_resume(self):
+        raw = self.source / 'raw/2310.12345/v1/source'
+        original_hash = parse._file_hash
+        with patch.object(parse, '_file_hash', wraps=original_hash) as file_hash:
+            result = self.run_pipeline(frozen_input=True)
+        self.assertTrue(result['complete'])
+        self.assertEqual(sum(call.args == (raw.resolve(),) for call in file_hash.call_args_list), 1)
+        raw.write_text('new archive bytes', encoding='utf-8')
+        self.calls.clear()
+        self.assertTrue(self.run_pipeline(resume=True, frozen_input=True)['complete'])
+        self.assertEqual([v for s, _, v in self.calls if s == 'resolve'], [1])
+
+    def test_resume_reuses_checkpoints_from_pr20(self):
+        original_hash = parse._file_hash
+
+        def legacy_hash(path):
+            if path == Path(parse.__file__):
+                return parse._COMPATIBLE_PIPELINE_REVISIONS[0]
+            return original_hash(path)
+
+        with patch.object(parse, '_file_hash', side_effect=legacy_hash):
+            self.assertTrue(self.run_pipeline()['complete'])
+        self.calls.clear()
+        self.assertTrue(self.run_pipeline(resume=True, frozen_input=True)['complete'])
+        self.assertEqual(self.calls, [])
+
     def test_missing_artifact_recomputes_stage_and_descendants(self):
         self.run_pipeline()
         (self.output / 'parsed/2310.12345/v1/normalized_tree.json').unlink()

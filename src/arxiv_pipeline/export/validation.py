@@ -13,9 +13,12 @@ from pathlib import Path, PureWindowsPath
 from arxiv_pipeline.common.schemas import SCHEMA_VERSION, ErrorInfo, StageResult
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
 from arxiv_pipeline.crawling.metadata import build_metadata
+from arxiv_pipeline.reporting.milestone2.validation import run as run_ms2
 
 
 def run(record, output_dir, *, version=None, upstream=None):
+    if upstream and 'deduplicate' in (upstream.get('stages') or {}):
+        return run_ms2(record, output_dir, version=version, upstream=upstream)
     """Validate one discovered paper and persist validation/<paper_key>.json.
 
     No API calls or corpus mutations. Unreadable/malformed inputs become structured
