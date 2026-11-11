@@ -29,6 +29,12 @@ REQUIRED = {'resolve': {'gathered'}, 'hierarchy': {'raw_tree'},
             'deduplicate': {'elements', 'hierarchy', 'bibtex', 'parsing_manifest'},
             'validate_parse': {'validation'}}
 TERMINAL = {'success', 'no_source'}
+# PR #20 fingerprints (LF and CRLF). The I/O optimization leaves stage inputs,
+# outputs and validation rules compatible with these checkpoints.
+_COMPATIBLE_PIPELINE_REVISIONS = (
+    '151dd3b5bf092e299a49d5e65c024468cce7ef90efdcfa7d16f57ea752e55a2b',
+    '1706a3f196873b1c7dce8ca996501833f15aa75e99763a4866072abeb99b4a60',
+)
 
 
 def _digest(value):
@@ -168,10 +174,12 @@ def _snapshot(source, record, version):
             raise ValueError('MS1 stage checkpoint must be an object')
         for artifact in (stages[stage] or {}).get('artifacts', {}).values():
             target = _path(source, artifact)
-            if target.is_file():
+            if artifact not in files and target.is_file():
                 files[artifact] = _file_hash(target)
-    raw = _path(source, version.get('source_path'))
-    files[version['source_path']] = _file_hash(raw) if raw.is_file() else None
+    source_path = version.get('source_path')
+    raw = _path(source, source_path)
+    if source_path not in files:
+        files[source_path] = _file_hash(raw) if raw.is_file() else None
     corpus = _path(source, version.get('corpus_path'))
     files[version['corpus_path']] = 'directory' if corpus.is_dir() else None
     directories = [corpus] if corpus.is_dir() else []
@@ -185,7 +193,9 @@ def _snapshot(source, record, version):
                     raise ValueError('Corpus directory links are not supported in an immutable snapshot')
                 directories.append(path)
             elif path.is_file():
-                files[path.relative_to(source).as_posix()] = _file_hash(path)
+                relative = path.relative_to(source).as_posix()
+                if relative not in files:
+                    files[relative] = _file_hash(path)
     return _digest(dict(paper_id=record['arxiv_id'], version=version, stages=stages, files=files)), stages
 
 
@@ -228,19 +238,20 @@ class _Runner:
     def artifacts(self, result):
         if not isinstance(result.get('artifacts'), dict):
             raise ValueError('Adapter artifacts must be a mapping')
-        inventory = {}
+        inventory, payloads = {}, {}
         for name, relative in result['artifacts'].items():
             target = _path(self.output, relative)
             if not target.is_file():
                 raise ValueError('MS2 artifact must be a file inside the output root')
+            data = target.read_bytes()
             if result.get('stage') == 'deduplicate' and name == 'bibtex_file':
                 # TV4 also exports references.bib as UTF-8 text (possibly empty).
                 # Its producer owns BibTeX semantics; resume still hashes its bytes.
-                target.read_text(encoding='utf-8')
+                data.decode('utf-8')
             else:
-                _read(target)  # All other contract artifacts must be valid JSON.
-            inventory[relative] = _file_hash(target)
-        return inventory
+                payloads[name] = json.loads(data.decode('utf-8-sig'))
+            inventory[relative] = hashlib.sha256(data).hexdigest()
+        return inventory, payloads
 
     def validate(self, result, stage, record, version, upstream):
         number = version['version'] if version else None
@@ -250,13 +261,13 @@ class _Runner:
             raise ValueError('Adapter returned mismatched stage/paper/version/schema')
         if result.get('version') is not None and type(result['version']) is not int:
             raise ValueError('Adapter version must be an integer, not a boolean')
-        inventory = self.artifacts(result)
+        inventory, payloads = self.artifacts(result)
         if result.get('status') in TERMINAL:
             if not REQUIRED[stage].issubset(result['artifacts']):
                 raise ValueError('Adapter did not produce its required artifacts')
             if stage == 'deduplicate':
                 artifacts = result['artifacts']
-                manifest = _read(_path(self.output, artifacts['parsing_manifest']))
+                manifest = payloads['parsing_manifest']
                 expected = [v['version'] for v in record['versions']]
                 if not isinstance(manifest, dict) or (
                     manifest.get('schema_version'), manifest.get('arxiv_id'), manifest.get('input_snapshot_id'),
@@ -271,10 +282,10 @@ class _Runner:
                     raise ValueError('Export manifest does not cover every version')
                 for table in ('elements', 'hierarchy', 'bibtex'):
                     if (manifest.get('tables', {}).get(table) != artifacts[table]
-                            or not isinstance(_read(_path(self.output, artifacts[table])), list)):
+                            or not isinstance(payloads[table], list)):
                         raise ValueError('Export tables/manifest do not agree')
             elif stage == 'validate_parse':
-                validation = _read(_path(self.output, result['artifacts']['validation']))
+                validation = payloads['validation']
                 if not isinstance(validation, dict) or (
                     validation.get('schema_version'), validation.get('arxiv_id'), validation.get('valid')) != (
                         PARSING_SCHEMA_VERSION, record['arxiv_id'], True):
@@ -291,21 +302,28 @@ class _Runner:
         dependencies = _path(self.output, checkpoint_rel.removesuffix('.json') + '.dependencies.json')
         material = dict(upstream)
         material['context'] = {k: v for k, v in upstream['context'].items() if k != 'input_root'}
-        fingerprint = _digest(dict(stage=stage, schema=PARSING_SCHEMA_VERSION,
-                                   input=material, implementation=self.revisions[stage], pipeline=self.pipeline_revision))
+        def fingerprint_for(revision):
+            return _digest(dict(stage=stage, schema=PARSING_SCHEMA_VERSION,
+                                input=material, implementation=self.revisions[stage], pipeline=revision))
+
+        fingerprint = fingerprint_for(self.pipeline_revision)
         cached = False
         if not blocked and self.resume:
             old, meta = _read(checkpoint, cache=True), _read(dependencies, cache=True)
             if isinstance(old, dict) and isinstance(meta, dict) and old.get('status') in TERMINAL:
                 try:
-                    inventory = self.validate(old, stage, record, version, upstream)
-                    cached = (meta.get('fingerprint') == fingerprint and meta.get('checkpoint_hash') == _digest(old)
-                              and meta.get('artifacts') == inventory)
+                    saved = meta.get('fingerprint')
+                    matches = saved == fingerprint or any(
+                        saved == fingerprint_for(revision) for revision in _COMPATIBLE_PIPELINE_REVISIONS)
+                    if matches and meta.get('checkpoint_hash') == _digest(old):
+                        inventory = self.validate(old, stage, record, version, upstream)
+                        cached = meta.get('artifacts') == inventory
                 except (ValueError, TypeError, KeyError, OSError, AttributeError):
                     pass
                 if cached:
                     result = old
         if not cached:
+            inventory = {}
             if blocked:
                 result = StageResult(stage, paper, number, 'skipped', utc_now(),
                     error=ErrorInfo('upstream_unavailable', blocked), schema_version=PARSING_SCHEMA_VERSION).to_dict()
@@ -318,7 +336,7 @@ class _Runner:
                     if not isinstance(raw, StageResult):
                         raise TypeError('Adapter must return StageResult')
                     result = raw.to_dict()
-                    self.validate(result, stage, record, version, upstream)
+                    inventory = self.validate(result, stage, record, version, upstream)
                 except NotImplementedError as exc:
                     result = StageResult(stage, paper, number, 'not_implemented', utc_now(),
                         error=ErrorInfo('module_pending', str(exc)), schema_version=PARSING_SCHEMA_VERSION).to_dict()
@@ -326,7 +344,6 @@ class _Runner:
                     result = StageResult(stage, paper, number, 'error', utc_now(),
                         error=ErrorInfo(type(exc).__name__, str(exc)), schema_version=PARSING_SCHEMA_VERSION).to_dict()
             atomic_json(checkpoint, result)
-            inventory = self.artifacts(result)
             atomic_json(dependencies, dict(schema_version=PARSING_SCHEMA_VERSION, fingerprint=fingerprint,
                                            checkpoint_hash=_digest(result), artifacts=inventory))
         if self.observer:
@@ -378,11 +395,14 @@ def _invalidate_unseen_exports(output, seen):
 
 
 def run(identifiers, output: Path, *, input_root: Path, resume=False, force=False,
-        selected_versions=None, adapters=None, observer=None, run_id=None):
+        selected_versions=None, adapters=None, observer=None, run_id=None,
+        frozen_input=False, paper_observer=None):
     """Parse selected publications from MS1; absent identifiers select all records.
 
     ``adapters`` is an optional mapping for offline integration tests. A missing
     production module is not_implemented, never synthesized as successful output.
+    ``frozen_input`` requires an MS1 snapshot with no writer for the entire run.
+    It hashes the current bytes once per version, including when resuming.
     """
     source, output = validate_roots(input_root, output)
     identifiers = list(identifiers) if identifiers is not None else []
@@ -394,10 +414,12 @@ def run(identifiers, output: Path, *, input_root: Path, resume=False, force=Fals
     runner = _Runner(output, resume and not force, adapters, observer)
     output.mkdir(parents=True, exist_ok=True)
     outcomes, all_stages = [], []
-    for record, record_paths, conflict in records:
+    for index, (record, record_paths, conflict) in enumerate(records, 1):
         paper = record['arxiv_id']
         if record.get('status') in {'not_found', 'invalid_id'} and not conflict:
             excluded.append(dict(input_id=record.get('input_id'), arxiv_id=paper, status=record['status']))
+            if paper_observer:
+                paper_observer(index, len(records), paper, record['status'])
             continue
         outcome = dict(arxiv_id=paper, expected_versions=[], selected_versions=[], versions=[],
                        status='incomplete', complete=False, artifacts={}, reason=None)
@@ -410,7 +432,7 @@ def run(identifiers, output: Path, *, input_root: Path, resume=False, force=Fals
             outcome.update(expected_versions=expected, selected_versions=selected)
             if not set(selected).issubset(expected):
                 raise ValueError('Selected version is absent from MS1 discovery')
-            discovery_hashes = {p: _file_hash(p) for p in record_paths}
+            discovery_hashes = {} if frozen_input else {p: _file_hash(p) for p in record_paths}
             snapshots, bundle, stable = {}, [], True
             for version in versions:
                 number = version['version']
@@ -437,7 +459,8 @@ def run(identifiers, output: Path, *, input_root: Path, resume=False, force=Fals
                 all_stages.extend((resolved, hierarchy, normalized, bibliography))
                 bundle.append(dict(version=number, normalize=normalized, bibliography=bibliography))
                 try:
-                    unchanged = not snapshot_error and _snapshot(source, record, version)[0] == snapshot
+                    unchanged = not snapshot_error and (
+                        frozen_input or _snapshot(source, record, version)[0] == snapshot)
                 except (ValueError, TypeError, KeyError, AttributeError, OSError):
                     unchanged = False
                 stable = stable and unchanged
@@ -446,7 +469,7 @@ def run(identifiers, output: Path, *, input_root: Path, resume=False, force=Fals
                     status='data_error' if not unchanged else ('skipped' if failed else resolved['status']),
                     reason='MS1 input changed/unreadable during parsing' if not unchanged else failed))
             # Validate the entire input boundary before publishing any paper-level export.
-            stable = stable and _stable(source, record, versions, snapshots, discovery_hashes)
+            stable = stable and (frozen_input or _stable(source, record, versions, snapshots, discovery_hashes))
             ready = selected == expected and stable and len(bundle) == len(expected) and all(
                 not _blocked({'normalize': v['normalize'], 'bibliography': v['bibliography']}) for v in bundle)
             paper_snapshot = _digest(dict(record=record, snapshots=snapshots))
@@ -457,7 +480,7 @@ def run(identifiers, output: Path, *, input_root: Path, resume=False, force=Fals
                 dict(context=context, stages={'deduplicate': export}), blocked=_blocked({'deduplicate': export}))
             all_stages.extend((export, validation))
             # A producer may change MS1 while export/validation is running too.
-            ready = ready and _stable(source, record, versions, snapshots, discovery_hashes)
+            ready = ready and (frozen_input or _stable(source, record, versions, snapshots, discovery_hashes))
             if ready and export['status'] in TERMINAL:
                 outcome['artifacts'] = export['artifacts']
             else:
@@ -471,10 +494,13 @@ def run(identifiers, output: Path, *, input_root: Path, resume=False, force=Fals
             _invalidate_export(output, paper, str(exc))
         outcomes.append(outcome)
         atomic_json(_path(output, f'state/parsing/{paper_key(paper)}.json'), outcome)
+        if paper_observer:
+            paper_observer(index, len(records), paper, outcome['status'])
     if input_errors and not identifiers:
         outcomes.extend(_invalidate_unseen_exports(output, {p['arxiv_id'] for p in outcomes}))
     summary = dict(schema_version=PARSING_SCHEMA_VERSION, mode='parse', run_id=run_id or str(uuid4()),
-                   timestamp=utc_now(), complete=not input_errors and all(p['complete'] for p in outcomes),
+                   timestamp=utc_now(), frozen_input=frozen_input,
+                   complete=not input_errors and all(p['complete'] for p in outcomes),
                    papers=len(outcomes), expected_versions=sum(len(p['expected_versions']) for p in outcomes),
                    stage_statuses=dict(Counter(s['status'] for s in all_stages)),
                    paper_results=outcomes, excluded_inputs=excluded, input_errors=input_errors)

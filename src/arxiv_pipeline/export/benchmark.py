@@ -351,6 +351,8 @@ def execute_pipeline_benchmark(
     resume: bool = False,
     summary_out: Path | str | None = None,
     total_assigned: int | None = None,
+    frozen_input: bool = False,
+    paper_observer=None,
 ) -> dict[str, Any]:
     """Execute the real pipeline while monitoring time and memory, then generate parsing_summary."""
     from arxiv_pipeline.pipeline.parse import run as run_parse
@@ -363,11 +365,15 @@ def execute_pipeline_benchmark(
             output=output_dir,
             identifiers=identifiers,
             resume=resume,
+            frozen_input=frozen_input,
+            paper_observer=paper_observer,
         )
         wall_time = time.perf_counter() - t0
         peak_mb, avg_mb, _ = sampler.stop()
 
     total = total_assigned if total_assigned is not None else parse_summary["papers"]
+    if paper_observer:
+        print("Parsing finished. Verifying output for benchmark.", flush=True)
     summary = generate_parsing_summary(
         out,
         wall_time_sec=wall_time,
