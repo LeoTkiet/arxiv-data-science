@@ -9,8 +9,16 @@ chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại ce
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Mã production cố định tại `b932d98eae90d50611004ccc5e2d91709a77b7bf` để các
-thành viên dùng cùng phiên bản đã nghiệm thu.
+Notebook dùng mã production `25c657c20642a8b2a18bea1417c081835f790c4a`.
+Chế độ Colab băm dữ liệu MS1 một lượt cho mỗi version và yêu cầu giữ snapshot
+cố định trong suốt lượt chạy. Resume vẫn đọc hash input và kiểm tra artifact.
+CLI mặc định tiếp tục kiểm tra lại input trong lúc xử lý.
+
+Để chuyển một lượt FULL đang chạy sang bản này, dừng cell parsing cũ và đợi
+cell dừng hẳn. Mở notebook mới trong runtime sạch, giữ nguyên `MEMBER`,
+`MS1_INPUT`, `RUN_MODE='FULL'` và đường dẫn output đã dùng. Các checkpoint
+PR #20 hợp lệ được dùng lại sau kiểm tra hash. Cell parsing in số ID đã xét,
+trạng thái ID vừa xét và số giây/ID gần đây.
 
 `acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
 cảnh báo. Output tách theo `<OUTPUT_ROOT>/<RUN_TAG>/<smoke|full>/<MEMBER>/`;
