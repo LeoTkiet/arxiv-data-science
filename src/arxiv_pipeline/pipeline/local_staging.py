@@ -229,6 +229,10 @@ def run(job, output, *, local_root, code_sha, workers=32, batch_size=25, check_r
         raise ValueError('Unknown member')
     output.mkdir(parents=True, exist_ok=True)
     local_root.mkdir(parents=True, exist_ok=True)
+    if not safe_path(output, 'completion-index.json').exists():
+        # Preserve the actual legacy producer before replacing run configuration,
+        # including if discovery copy is interrupted on the first migration.
+        completion_index.save(output, identity, {}, origin=previous_config)
     atomic_json(output / 'acceptance.json', dict(
         member=job['member'], code_sha=code_sha, complete=False,
         full_assignment_accepted=False, status='running'))

@@ -174,12 +174,13 @@ def test_code_revision_change_disables_paper_skip(tmp_path):
     assert result['total_stages'] == 6
 
 
-def test_interruption_does_not_certify_unknown_legacy_producer(tmp_path):
+@pytest.mark.parametrize('interrupted_step', ['_stage_inputs', '_discovery_index'])
+def test_interruption_does_not_certify_unknown_legacy_producer(tmp_path, interrupted_step):
     output = make_parsed_output(tmp_path, count=1)
     item = dict(job([PAPER]), input=str(tmp_path / 'ms1'))
     (output / 'acceptance-config.json').write_text(json.dumps(dict(
         job=item, code_sha='unknown-code')))
-    with patch.object(local_staging, '_stage_inputs', side_effect=KeyboardInterrupt):
+    with patch.object(local_staging, interrupted_step, side_effect=KeyboardInterrupt):
         with pytest.raises(KeyboardInterrupt):
             local_staging.run(item, output, local_root=tmp_path / 'work', code_sha='new')
     result = local_staging.run(item, output, local_root=tmp_path / 'work2', code_sha='new')
