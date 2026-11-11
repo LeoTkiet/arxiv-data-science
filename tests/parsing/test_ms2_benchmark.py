@@ -77,7 +77,7 @@ def test_colab_acceptance_cell_runs_real_modules_and_checks_assignment_coverage(
                              ids=None if full_scope else [PAPER], total_assigned=assigned_count,
                              assignment_range=f'{PAPER}:' + ('2310.12346' if assigned_count == 2 else PAPER))],
                    OUTPUT_BASE=tmp_path / 'acceptance', CODE_SHA='test-offline',
-                   RESUME=True, CHECK_RESUME=True, Path=Path)
+                   RESUME=True, CHECK_RESUME=True, Path=Path, LOCAL_ROOT=tmp_path / 'local')
     exec(compile(code, 'MS2_Integration_CPU.ipynb', 'exec'), context)
     result = json.loads((tmp_path / 'acceptance/tv1/acceptance.json').read_text())
     expected_complete = not full_scope or assigned_count == 1
@@ -97,7 +97,7 @@ def test_colab_acceptance_rejects_missing_selected_discovery(tmp_path):
     context = dict(JOBS=[dict(member='tv1', input=str(tmp_path / 'ms1'), ids=['2310.12346'],
                              total_assigned=2, assignment_range=f'{PAPER}:2310.12346')],
                    OUTPUT_BASE=tmp_path / 'acceptance', CODE_SHA='test-offline',
-                   RESUME=True, CHECK_RESUME=True, Path=Path)
+                   RESUME=True, CHECK_RESUME=True, Path=Path, LOCAL_ROOT=tmp_path / 'local')
     exec(compile(code, 'MS2_Integration_CPU.ipynb', 'exec'), context)
     result = json.loads((tmp_path / 'acceptance/tv1/acceptance.json').read_text())
     assert result['complete'] is False
@@ -136,17 +136,17 @@ def test_member_notebook_selects_official_range_and_separate_output(tmp_path, me
 
 def test_member_zip_contains_only_selected_member(tmp_path):
     import zipfile
-    notebook = json.loads((Path(__file__).parents[2] / 'colab/MS2_Integration_CPU.ipynb').read_text(encoding='utf-8'))
-    code = next(''.join(cell['source']) for cell in notebook['cells']
-                if cell['cell_type'] == 'code' and 'CREATE_ZIP = False' in ''.join(cell['source']))
-    for member in ['tv1', 'tv2']:
-        (tmp_path / member).mkdir()
-        (tmp_path / member / 'acceptance.json').write_text('{}')
-        (tmp_path / member / 'result.txt').write_text(member)
-    context = dict(Path=Path, OUTPUT_BASE=tmp_path, MEMBER='tv1', RUN_TAG='test', RUN_MODE='FULL')
-    exec(compile(code.replace('CREATE_ZIP = False', 'CREATE_ZIP = True'), 'member-zip', 'exec'), context)
-    with zipfile.ZipFile(tmp_path / 'TV_tv1_MS2_RESULTS_test_full.zip') as bundle:
-        assert set(bundle.namelist()) == {'tv1/acceptance.json', 'tv1/result.txt'}
+    from arxiv_pipeline.pipeline.local_staging import run
+    output = make_parsed_output(tmp_path, count=1)
+    foreign = output / 'tables/2310.99999/foreign.json'
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text('{}')
+    run(dict(member='tv1', input=str(tmp_path / 'ms1'), ids=[PAPER],
+             total_assigned=1, assignment_range=f'{PAPER}:{PAPER}'),
+        output, local_root=tmp_path / 'local', code_sha='test')
+    with zipfile.ZipFile(output / 'MS2_RESULTS.zip') as bundle:
+        assert all(name.startswith('tv1/') for name in bundle.namelist())
+        assert not any('2310.99999' in name for name in bundle.namelist())
 
 
 def test_benchmark_uses_current_scope_and_measured_denominator(tmp_path):

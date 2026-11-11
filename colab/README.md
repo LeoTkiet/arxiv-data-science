@@ -9,18 +9,39 @@ chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại ce
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Mã production cố định tại `b932d98eae90d50611004ccc5e2d91709a77b7bf` để các
-thành viên dùng cùng phiên bản đã nghiệm thu.
+Notebook dùng mã production `40103bacb5c34a85baecaa16fc78a856044961e8`.
+Mỗi lô mặc định có 25 ID. Tối đa 32 luồng chép source/checkpoint cần thiết về
+`/content/arxiv_ms2_local`; parser và QA đọc/ghi trên ổ local. Snapshot MS1 cần
+được giữ cố định suốt lượt chạy. Source của lô được dọn sau khi lưu checkpoint,
+output local tích lũy để tạo ZIP cuối. Cần đủ dung lượng cho source một lô,
+output của lượt chạy và ZIP xuất cuối.
+
+Để chuyển một lượt FULL đang chạy sang bản này, dừng cell parsing cũ và đợi
+cell dừng hẳn. Mở notebook mới trong runtime sạch, giữ nguyên `MEMBER`,
+`MS1_INPUT`, `RUN_MODE='FULL'` và đường dẫn output đã dùng. Các checkpoint
+PR #20 hợp lệ được dùng lại sau kiểm tra hash. Cell parsing in giai đoạn chép
+dữ liệu, số ID đã lưu trên Drive, giây/ID trong lô và số stage dùng cache.
+Lượt tiếp theo có thể tiếp tục từ cả file checkpoint cũ lẫn gói checkpoint mới.
 
 `acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
 cảnh báo. Output tách theo `<OUTPUT_ROOT>/<RUN_TAG>/<smoke|full>/<MEMBER>/`;
 các thành viên chạy song song trên output riêng. Không chạy hai runtime ghi
 cùng output của một người. Notebook cá nhân không ghi group receipt dùng chung.
-Cell cuối có `CREATE_ZIP=True` để đóng gói riêng kết quả thành viên, gửi TV1
-tích hợp và TV5 thống kê. Giữ checkpoint, dependency hashes, tables, parsed và
-validation. Không dùng thời gian resume làm tốc độ parsing mới; receipt ghi rõ
-resume bật hay tắt. SMOKE kiểm tra cache; FULL mặc định bỏ lượt đọc lại kiểm tra
-cache để giảm I/O Drive, có thể bật `VERIFY_RESUME` nếu cần.
+Sau mỗi lô, output/checkpoint được đóng thành một ZIP trong `local-batches/`,
+kèm receipt và checksum. Receipt chỉ ghi khi ZIP đã copy xong. Runtime bị ngắt
+sẽ khôi phục các gói này và thử lại phần chưa lưu. Giữ `local-batches/` khi
+tiếp tục. Lô dùng lại hoàn toàn checkpoint đã đóng gói sẽ giữ gói hiện có.
+
+Khi hoàn tất, notebook tự xuất `MS2_RESULTS.zip`, `acceptance.json` và
+`delivery.json` trong output cá nhân trên Drive. ZIP chứa thư mục thành viên
+với đầy đủ tables, parsed, state, validation, manifests và summaries. Dùng ZIP
+này để bàn giao kết quả mới; các thư mục rời từ lượt cũ mang dữ liệu lượt cũ.
+`delivery.json` có trạng thái published và SHA-256 của ZIP đã xuất.
+
+Thời gian benchmark gồm đọc discovery, chép input, khôi phục checkpoint,
+parsing/QA local và lưu gói theo lô. Thời gian đóng gói/upload ZIP cuối ghi riêng
+trong delivery. Số stage dùng cache được ghi trong acceptance. SMOKE kiểm tra
+resume thêm trên local; FULL có thể bật `VERIFY_RESUME` nếu cần.
 Notebook này chưa được thực thi trên Colab trong lần nghiệm thu local.
 
 ## Milestone 1
