@@ -9,7 +9,19 @@ chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại ce
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Notebook dùng mã production `40103bacb5c34a85baecaa16fc78a856044961e8`.
+Notebook dùng mã production `d29a34e053468e40f1746c7fec7e57bd78b94f8d`.
+Resume ở cấp paper đọc `completion-index.json` và bỏ qua source của các paper
+đã qua validation trên cùng snapshot và mã xử lý tương thích. Các paper lỗi/dở
+và ID chưa thực hiện được đưa vào hàng đợi. Log in số paper bỏ qua trước khi
+chép dữ liệu. Metadata hoàn tất của các bản cũ được nhập một lần bằng 32 luồng.
+Discovery được lưu trong một gói nén để các lượt sau tránh đọc hàng nghìn file.
+
+Giữ nguyên dữ liệu MS1 giữa các lần resume. Khi sửa MS1, dùng snapshot/run tag
+mới hoặc cung cấp `snapshot_id` mới cho API để làm mới cache. Chế độ resume
+này dựa vào biên nhận của snapshot cố định, thay cho việc đọc lại mọi source.
+Thay đổi mã parsing/validation làm mất hiệu lực danh sách bỏ qua tương ứng.
+Giữ các file `completion-index.json`, `resume-discovery.json` và các thư mục
+`discovery-cache/`, `local-batches/` để khôi phục sau khi mất runtime.
 Mỗi lô mặc định có 25 ID. Tối đa 32 luồng chép source/checkpoint cần thiết về
 `/content/arxiv_ms2_local`; parser và QA đọc/ghi trên ổ local. Snapshot MS1 cần
 được giữ cố định suốt lượt chạy. Source của lô được dọn sau khi lưu checkpoint,
@@ -19,9 +31,11 @@ output của lượt chạy và ZIP xuất cuối.
 Để chuyển một lượt FULL đang chạy sang bản này, dừng cell parsing cũ và đợi
 cell dừng hẳn. Mở notebook mới trong runtime sạch, giữ nguyên `MEMBER`,
 `MS1_INPUT`, `RUN_MODE='FULL'` và đường dẫn output đã dùng. Các checkpoint
-PR #20 hợp lệ được dùng lại sau kiểm tra hash. Cell parsing in giai đoạn chép
+Các checkpoint stage còn dở được dùng lại sau kiểm tra hash. Cell parsing in giai đoạn chép
 dữ liệu, số ID đã lưu trên Drive, giây/ID trong lô và số stage dùng cache.
 Lượt tiếp theo có thể tiếp tục từ cả file checkpoint cũ lẫn gói checkpoint mới.
+Các paper đã hoàn tất được bỏ qua trước giai đoạn chép source. Output cũ được
+gom ở bước Final export sau khi xử lý hàng đợi để ZIP bàn giao có đủ phạm vi.
 
 `acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
 cảnh báo. Output tách theo `<OUTPUT_ROOT>/<RUN_TAG>/<smoke|full>/<MEMBER>/`;
