@@ -1,3 +1,4 @@
 # TV1 runtime uses the Python standard library (Python >= 3.10).
+# MS3 matching (TV4) needs numpy/scikit-learn/joblib/lightgbm via the [matching] extra; tests also need psutil from [reporting].
 # Install the local package and its arxiv-pipeline command:
--e .
+-e .[matching,reporting]
