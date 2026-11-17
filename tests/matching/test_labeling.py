@@ -181,18 +181,25 @@ def test_save_and_load_labels_json_roundtrip(tmp_path):
 def test_run_adapter_success_auto_and_errors(tmp_path):
     record = {"arxiv_id": "2310.12345"}
 
-    # Missing upstream -> skipped
+    # Missing upstream -> skipped with MATCHING_SCHEMA_VERSION (3.0)
     res_skip = run(record, tmp_path, upstream=None)
     assert res_skip.status == "skipped"
+    assert res_skip.schema_version == "3.0"
 
-    # Valid upstream with auto_label_if_empty=True -> success
-    bundles = _bundles()
+    # Missing arxiv_id -> data_error with schema 3.0
+    res_no_id = run({}, tmp_path, upstream=None)
+    assert res_no_id.status == "data_error"
+    assert res_no_id.schema_version == "3.0"
+
+    # Valid upstream for the requested paper with auto_label_if_empty=True -> success
+    target_bundle = [b for b in _bundles() if b.arxiv_id == "2310.12345"]
     res_ok = run(
         record,
         tmp_path,
-        upstream={"bundles": bundles, "auto_label_if_empty": True},
+        upstream={"bundles": target_bundle, "auto_label_if_empty": True},
     )
     assert res_ok.status == "success"
+    assert res_ok.schema_version == "3.0"
     assert "labels" in res_ok.artifacts
     assert "label_audit" in res_ok.artifacts
 
@@ -212,7 +219,130 @@ def test_run_adapter_success_auto_and_errors(tmp_path):
         label_source="manual",
         annotator="tv3",
     )
-    res_err = run(record, tmp_path, upstream={"bundles": bundles, "labels": [bad_label]})
+    res_err = run(record, tmp_path, upstream={"bundles": target_bundle, "labels": [bad_label]})
     assert res_err.status == "data_error"
+    assert res_err.schema_version == "3.0"
     assert res_err.error is not None
     assert res_err.error.kind == "label_validation_failed"
+
+
+def test_run_adapter_rejects_mismatched_paper_identity(tmp_path):
+    bundles = _bundles()
+    wrong_bundle = [b for b in bundles if b.arxiv_id == "2310.12346"]
+    out_dir = tmp_path / "mismatch_out"
+
+    # Passing bundle 2310.12346 when requesting 2310.12345 must fail without writing artifacts
+    res = run({"arxiv_id": "2310.12345"}, out_dir, upstream={"bundles": wrong_bundle})
+    assert res.status == "data_error"
+    assert res.schema_version == "3.0"
+    assert res.error is not None
+    assert res.error.kind == "identity_mismatch"
+    assert not (out_dir / "matching/2310.12345/labels.json").exists()
+
+    # Empty bundles list -> identity_mismatch
+    res_empty = run({"arxiv_id": "2310.12345"}, out_dir, upstream={"bundles": []})
+    assert res_empty.status == "data_error"
+    assert res_empty.error is not None
+    assert res_empty.error.kind == "identity_mismatch"
+
+    # Correct bundle but label belongs to another paper -> identity_mismatch
+    target_bundle = [b for b in bundles if b.arxiv_id == "2310.12345"]
+    wrong_label = LabelRecord(
+        arxiv_id="2310.12346",
+        citation_key="RefA",
+        groundtruth_arxiv_id=None,
+        decision="unmatched",
+        label_source="manual",
+        annotator="tv3",
+    )
+    res_lbl = run(
+        {"arxiv_id": "2310.12345"},
+        out_dir,
+        upstream={"bundles": target_bundle, "labels": [wrong_label]},
+    )
+    assert res_lbl.status == "data_error"
+    assert res_lbl.error is not None
+    assert res_lbl.error.kind == "identity_mismatch"
+
+
+def test_audit_label_manifest_requires_supervised_labels_for_quota():
+    # Build 25 publications x 20 entries = 500 manual entries, all uncertain or pending
+    bundles = []
+    pending_or_uncertain_labels = []
+    accepted_labels = []
+
+    for pub_idx in range(1, 26):
+        pid = f"2401.{pub_idx:05d}"
+        annotator = f"tv{((pub_idx - 1) % 5) + 1}"
+        bibs = [
+            dict(
+                arxiv_id=pid,
+                citation_key=f"Ref{j}",
+                entry_type="article",
+                title=f"Title {j}",
+                authors=["Author A"],
+                year=2023,
+                doi=None,
+                journal=None,
+                url=None,
+            )
+            for j in range(20)
+        ]
+        bundles.append(publication_from_rows(pid, bibs, [], readiness="ready"))
+        for j in range(20):
+            # Half uncertain (even if accepted), half pending -> 0 supervised
+            if j % 2 == 0:
+                pending_or_uncertain_labels.append(
+                    LabelRecord(
+                        arxiv_id=pid,
+                        citation_key=f"Ref{j}",
+                        groundtruth_arxiv_id=None,
+                        decision="uncertain",
+                        label_source="manual",
+                        annotator=annotator,
+                        review_status="accepted",
+                        notes="ambiguous",
+                    )
+                )
+            else:
+                pending_or_uncertain_labels.append(
+                    LabelRecord(
+                        arxiv_id=pid,
+                        citation_key=f"Ref{j}",
+                        groundtruth_arxiv_id=None,
+                        decision="unmatched",
+                        label_source="manual",
+                        annotator=annotator,
+                        review_status="pending",
+                    )
+                )
+            accepted_labels.append(
+                LabelRecord(
+                    arxiv_id=pid,
+                    citation_key=f"Ref{j}",
+                    groundtruth_arxiv_id=None,
+                    decision="unmatched",
+                    label_source="manual",
+                    annotator=annotator,
+                    reviewer="tv5",
+                    review_status="accepted",
+                )
+            )
+
+    audit_zero = audit_label_manifest(bundles, pending_or_uncertain_labels)
+    assert audit_zero["manual_entered_entries"] == 500
+    assert audit_zero["manual_supervised_entries"] == 0
+    assert audit_zero["qualifying_manual_publications"] == 0
+    assert audit_zero["manual_quota_met"] is False
+    for ann_stats in audit_zero["annotators"].values():
+        assert ann_stats["entries"] == 100
+        assert ann_stats["supervised_entries"] == 0
+        assert ann_stats["meets_quota"] is False
+
+    audit_pass = audit_label_manifest(bundles, accepted_labels)
+    assert audit_pass["manual_supervised_entries"] == 500
+    assert audit_pass["qualifying_manual_publications"] == 25
+    assert audit_pass["manual_quota_met"] is True
+    for ann_stats in audit_pass["annotators"].values():
+        assert ann_stats["supervised_entries"] == 100
+        assert ann_stats["meets_quota"] is True

@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Callable, Iterable
 
-from arxiv_pipeline.common.schemas import PARSING_SCHEMA_VERSION, ErrorInfo, StageResult
+from arxiv_pipeline.common.schemas import MATCHING_SCHEMA_VERSION, ErrorInfo, StageResult
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
 from arxiv_pipeline.matching.contracts import (
     ContractError,
@@ -225,18 +225,25 @@ def audit_label_manifest(
     report = validate_label_manifest(bundles, labels)
     by_pub_total: dict[str, int] = {b.arxiv_id: len(b.bibtex) for b in bundles}
     by_pub_labeled: dict[str, int] = {b.arxiv_id: 0 for b in bundles}
+    by_pub_supervised: dict[str, int] = {b.arxiv_id: 0 for b in bundles}
+    by_pub_supervised_manual: dict[str, int] = {b.arxiv_id: 0 for b in bundles}
     by_annotator_entries: dict[str, int] = {}
+    by_annotator_supervised_entries: dict[str, int] = {}
     by_annotator_pubs: dict[str, set[str]] = {}
+    by_annotator_supervised_pubs: dict[str, set[str]] = {}
     by_source: dict[str, int] = {"manual": 0, "heuristic": 0}
     by_decision: dict[str, int] = {"matched": 0, "unmatched": 0, "uncertain": 0}
     by_review: dict[str, int] = {"pending": 0, "accepted": 0, "rejected": 0}
 
     manual_pubs: set[str] = set()
     heuristic_pubs: set[str] = set()
+    manual_supervised_total = 0
 
     for label in labels:
         if label.arxiv_id in by_pub_labeled:
             by_pub_labeled[label.arxiv_id] += 1
+            if label.is_supervised:
+                by_pub_supervised[label.arxiv_id] += 1
         by_source[label.label_source] = by_source.get(label.label_source, 0) + 1
         by_decision[label.decision] = by_decision.get(label.decision, 0) + 1
         by_review[label.review_status] = by_review.get(label.review_status, 0) + 1
@@ -246,11 +253,22 @@ def audit_label_manifest(
             ann = label.annotator or "<unknown>"
             by_annotator_entries[ann] = by_annotator_entries.get(ann, 0) + 1
             by_annotator_pubs.setdefault(ann, set()).add(label.arxiv_id)
+            if label.is_supervised:
+                manual_supervised_total += 1
+                by_pub_supervised_manual[label.arxiv_id] = (
+                    by_pub_supervised_manual.get(label.arxiv_id, 0) + 1
+                )
+                by_annotator_supervised_entries[ann] = (
+                    by_annotator_supervised_entries.get(ann, 0) + 1
+                )
+                by_annotator_supervised_pubs.setdefault(ann, set()).add(label.arxiv_id)
         else:
             heuristic_pubs.add(label.arxiv_id)
 
     qualifying_manual_pubs = [
-        pid for pid in manual_pubs if by_pub_labeled.get(pid, 0) >= min_entries_per_pub
+        pid
+        for pid in manual_pubs
+        if by_pub_supervised_manual.get(pid, 0) >= min_entries_per_pub
     ]
     pool_overlap = sorted(manual_pubs & heuristic_pubs)
 
@@ -258,9 +276,11 @@ def audit_label_manifest(
         ann: {
             "publications": len(by_annotator_pubs[ann]),
             "entries": count,
+            "supervised_publications": len(by_annotator_supervised_pubs.get(ann, set())),
+            "supervised_entries": by_annotator_supervised_entries.get(ann, 0),
             "meets_quota": (
-                len(by_annotator_pubs[ann]) >= min_pubs_per_annotator
-                and count >= min_entries_per_annotator
+                len(by_annotator_supervised_pubs.get(ann, set())) >= min_pubs_per_annotator
+                and by_annotator_supervised_entries.get(ann, 0) >= min_entries_per_annotator
             ),
         }
         for ann, count in sorted(by_annotator_entries.items())
@@ -275,10 +295,12 @@ def audit_label_manifest(
         "by_decision": by_decision,
         "by_review_status": by_review,
         "manual_publication_count": len(manual_pubs),
+        "manual_entered_entries": by_source.get("manual", 0),
+        "manual_supervised_entries": manual_supervised_total,
         "qualifying_manual_publications": len(qualifying_manual_pubs),
         "manual_quota_met": (
             len(qualifying_manual_pubs) >= min_manual_pubs
-            and by_source.get("manual", 0) >= min_manual_pubs * min_entries_per_pub
+            and manual_supervised_total >= min_manual_pubs * min_entries_per_pub
         ),
         "heuristic_publication_count": len(heuristic_pubs),
         "pool_overlap_publications": pool_overlap,
@@ -287,6 +309,7 @@ def audit_label_manifest(
             pid: {
                 "total_bibtex": by_pub_total[pid],
                 "labeled": by_pub_labeled[pid],
+                "supervised": by_pub_supervised[pid],
             }
             for pid in sorted(by_pub_total)
         },
@@ -402,11 +425,23 @@ def run(record, output_dir, *, version=None, upstream=None):
             None,
             "data_error",
             utc_now(),
-            schema_version=PARSING_SCHEMA_VERSION,
+            schema_version=MATCHING_SCHEMA_VERSION,
             error=ErrorInfo("invalid_input", "Missing arxiv_id in record"),
         )
 
-    paper = canonical_id(raw_id)
+    try:
+        paper = canonical_id(raw_id)
+    except ContractError as exc:
+        return StageResult(
+            "labeling",
+            str(raw_id),
+            None,
+            "data_error",
+            utc_now(),
+            schema_version=MATCHING_SCHEMA_VERSION,
+            error=ErrorInfo("invalid_input", str(exc)),
+        )
+
     key = paper_key(paper)
     if not isinstance(upstream, dict) or "bundles" not in upstream:
         return StageResult(
@@ -415,7 +450,7 @@ def run(record, output_dir, *, version=None, upstream=None):
             None,
             "skipped",
             utc_now(),
-            schema_version=PARSING_SCHEMA_VERSION,
+            schema_version=MATCHING_SCHEMA_VERSION,
             error=ErrorInfo("upstream_unavailable", "PublicationBundle upstream input is required"),
         )
 
@@ -436,11 +471,52 @@ def run(record, output_dir, *, version=None, upstream=None):
             else:
                 raise ContractError("Invalid bundle item in upstream")
 
+        if not bundles:
+            return StageResult(
+                "labeling",
+                paper,
+                None,
+                "data_error",
+                utc_now(),
+                schema_version=MATCHING_SCHEMA_VERSION,
+                error=ErrorInfo("identity_mismatch", f"No PublicationBundle provided for {paper}"),
+            )
+
+        mismatched_bundles = [b.arxiv_id for b in bundles if b.arxiv_id != paper]
+        if mismatched_bundles:
+            return StageResult(
+                "labeling",
+                paper,
+                None,
+                "data_error",
+                utc_now(),
+                schema_version=MATCHING_SCHEMA_VERSION,
+                error=ErrorInfo(
+                    "identity_mismatch",
+                    f"Bundle arxiv_id mismatch: expected {paper}, got {mismatched_bundles}",
+                ),
+            )
+
         raw_labels = upstream.get("labels", [])
         labels = [
             lbl if isinstance(lbl, LabelRecord) else LabelRecord(**lbl)
             for lbl in raw_labels
         ]
+        mismatched_labels = [lbl.arxiv_id for lbl in labels if lbl.arxiv_id != paper]
+        if mismatched_labels:
+            return StageResult(
+                "labeling",
+                paper,
+                None,
+                "data_error",
+                utc_now(),
+                schema_version=MATCHING_SCHEMA_VERSION,
+                error=ErrorInfo(
+                    "identity_mismatch",
+                    f"Label arxiv_id mismatch: expected {paper}, got {mismatched_labels}",
+                ),
+            )
+
         if not labels and upstream.get("auto_label_if_empty"):
             from arxiv_pipeline.matching.heuristics import auto_label
             labels = auto_label(bundles, upstream.get("policy"))
@@ -464,7 +540,7 @@ def run(record, output_dir, *, version=None, upstream=None):
             None,
             status,
             utc_now(),
-            schema_version=PARSING_SCHEMA_VERSION,
+            schema_version=MATCHING_SCHEMA_VERSION,
             artifacts={"labels": labels_rel, "label_audit": audit_rel},
             error=error,
         )
@@ -475,6 +551,6 @@ def run(record, output_dir, *, version=None, upstream=None):
             None,
             "data_error",
             utc_now(),
-            schema_version=PARSING_SCHEMA_VERSION,
+            schema_version=MATCHING_SCHEMA_VERSION,
             error=ErrorInfo("labeling_error", str(exc)),
         )
