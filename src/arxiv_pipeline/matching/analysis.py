@@ -1,0 +1,206 @@
+"""TV4 error analysis (T4-04): ablation, importance, slices, error cases.
+
+Everything here runs on train/valid only; test stays untouched until the model
+config is frozen. Runs on mock data today:
+    python -m arxiv_pipeline.matching.analysis --mock
+
+TODO(T4-04, blocked on real data):
+- Official TV2 group names are wired in (FEATURE_GROUPS); re-check if TV2's
+  schema changes after PR #24 merges.
+- Swap mrr_at_5 for TV5's official evaluator (T5-02) and confirm how labeled
+  "unmatched" entries count in MRR@5.
+- Add slices on real metadata: missing DOI/title, entry_type, publication size,
+  manual vs auto pool, hierarchy depth (if features use M2 hierarchy).
+- Error taxonomy needs bibtex/reference text joined back by key (T1-02) so
+  error cases can be read, not just counted.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
+from collections import Counter, defaultdict
+
+from arxiv_pipeline.matching.contracts import FeatureBatch, FeatureSchema, PairFeature
+from arxiv_pipeline.matching.model import fit_model, mrr_at_5, predict_scores
+from arxiv_pipeline.matching.train import (
+    mock_dataset, partition_batch, targets_from_labels,
+)
+
+FEATURE_GROUPS = {
+    "title": ["title_exact_match", "title_jaccard_word", "title_levenshtein_ratio",
+              "title_char_ngram_cosine", "title_len_diff_ratio"],
+    "author": ["author_jaccard_last", "first_author_match", "author_count_diff"],
+    "identifier": ["doi_exact_match", "has_doi_both", "arxiv_id_match"],
+    "temporal": ["year_exact_match", "year_diff_abs", "year_is_chronological",
+                 "is_bib_year_missing", "is_ref_year_missing"],
+}
+MOCK_GROUPS = {
+    "title": ["title_jaccard", "title_char_sim", "title_missing"],
+    "author": ["author_overlap"],
+    "temporal": ["year_abs_diff"],
+    "identifier": ["has_doi_match"],
+}
+
+
+def resolve_groups(columns) -> dict[str, list[str]]:
+    """Pick the group map matching the batch; fail loudly on unknown columns."""
+    cols = set(columns)
+    for groups in (FEATURE_GROUPS, MOCK_GROUPS):
+        known = {c for g in groups.values() for c in g}
+        if cols <= known:
+            return {k: [c for c in v if c in cols] for k, v in groups.items()
+                    if any(c in cols for c in v)}
+    raise ValueError(f"Columns without a feature group: {sorted(cols - {c for g in FEATURE_GROUPS.values() for c in g})}")
+
+
+def _subset(batch: FeatureBatch, keep: list[str], schema=None):
+    """Batch restricted to `keep`; with a schema, build the matching sub-schema.
+
+    Returns (batch, sub_schema). The sub-schema keeps TV2's specs and order, so
+    the batch ID equals sub_schema.schema_id and fit_model validates it.
+    """
+    sub = None
+    if schema is not None:
+        sub = FeatureSchema([f for f in schema.features if f.name in keep], schema.schema_version)
+        keep = [f.name for f in sub.features]
+        schema_id = sub.schema_id
+    else:
+        schema_id = f"{batch.feature_schema_id}:{','.join(keep)}"
+    rows = [PairFeature(r.arxiv_id, r.citation_key, r.ref_arxiv_id,
+                        {k: r.values[k] for k in keep}) for r in batch.rows]
+    return FeatureBatch(rows, schema_id), sub
+
+
+def _rank_of_gold(scores, targets):
+    """Per labeled-positive query: 1-based rank of the gold candidate (or None)."""
+    by_q = defaultdict(list)
+    for s in scores:
+        by_q[(s.arxiv_id, s.citation_key)].append(s)
+    out = {}
+    for k, y in targets.items():
+        if y == 1:
+            ranked = sorted(by_q[k[:2]], key=lambda s: (-s.score, s.ref_arxiv_id))
+            ids = [s.ref_arxiv_id for s in ranked]
+            out[k[:2]] = (ids.index(k[2]) + 1, ranked)
+    return out
+
+
+def ablation(train, train_t, valid, valid_t, config, groups=None):
+    """Drop one feature group at a time; report valid MRR@5 delta vs all features."""
+    cols = list(train.rows[0].values)
+    groups = groups or resolve_groups(cols)
+    full = mrr_at_5(predict_scores(fit_model(train, train_t, valid, valid_t, config), valid),
+                    valid_t, queries=config.get("valid_queries"))
+    rows = [dict(dropped=None, valid_mrr_at_5=full, delta=0.0)]
+    for name, group in groups.items():
+        keep = [c for c in cols if c not in group]
+        if not keep:
+            continue
+        schema = config.get("feature_schema")
+        tr, sub = _subset(train, keep, schema)
+        va, _ = _subset(valid, keep, schema)
+        cfg = dict(config, feature_schema=sub) if schema is not None else config
+        m = mrr_at_5(predict_scores(fit_model(tr, train_t, va, valid_t, cfg), va), valid_t,
+                     queries=config.get("valid_queries"))
+        rows.append(dict(dropped=name, valid_mrr_at_5=m, delta=m - full))
+    return rows
+
+
+def permutation_importance(artifact, valid, valid_t, *, repeats=5, seed=0):
+    """MRR@5 drop when one column is shuffled across valid rows (model-agnostic)."""
+    rng = random.Random(seed)
+    base = mrr_at_5(predict_scores(artifact, valid), valid_t)
+    out = {}
+    for col in artifact.feature_columns:
+        drops = []
+        for _ in range(repeats):
+            vals = [r.values[col] for r in valid.rows]
+            rng.shuffle(vals)
+            rows = [PairFeature(r.arxiv_id, r.citation_key, r.ref_arxiv_id, {**r.values, col: v})
+                    for r, v in zip(valid.rows, vals)]
+            drops.append(base - mrr_at_5(predict_scores(artifact, FeatureBatch(rows, valid.feature_schema_id)), valid_t))
+        out[col] = sum(drops) / repeats
+    return dict(sorted(out.items(), key=lambda kv: -kv[1]))
+
+
+# Boolean missingness/availability columns to slice on, if present in the batch
+# (TV2 official names first, synthetic mock names last).
+SLICE_COLUMNS = ("is_bib_year_missing", "is_ref_year_missing", "has_doi_both",
+                 "title_missing", "has_doi_match")
+
+
+def slices(artifact, valid, valid_t, labels):
+    """MRR@5 per slice of the gold pair: missingness flags present + label pool.
+
+    Only columns that exist in the batch are used, so absent columns never
+    produce a fake all-False slice.
+    """
+    ranks = _rank_of_gold(predict_scores(artifact, valid), valid_t)
+    gold = {k: r for k, r in ((row.key, row) for row in valid.rows) if valid_t.get(k) == 1}
+    source = {l.key: l.label_source for l in labels}
+    buckets = defaultdict(list)
+    for key, row in gold.items():
+        rr = ranks[key[:2]][0]
+        score = 1 / rr if rr <= 5 else 0.0
+        for col in SLICE_COLUMNS:
+            if col in row.values:
+                value = row.values[col]
+                label = "null" if value is None else bool(value)
+                buckets[f"{col}={label}"].append(score)
+        buckets[f"label_source={source.get(key[:2])}"].append(score)
+    return {k: dict(n=len(v), mrr_at_5=sum(v) / len(v)) for k, v in sorted(buckets.items())}
+
+
+def error_cases(artifact, valid, valid_t, *, limit=20):
+    """Every query whose gold is not ranked first, with a coarse reason tag.
+
+    Reported systematically (all errors counted, examples listed in key order),
+    never cherry-picked. TODO(T1-02): attach bibtex/reference text for reading.
+    """
+    ranks = _rank_of_gold(predict_scores(artifact, valid), valid_t)
+    feats = {r.key: r.values for r in valid.rows}
+    cases, tags = [], Counter()
+    for q, (rank, ranked) in sorted(ranks.items()):
+        if rank == 1:
+            continue
+        top = ranked[0]
+        gold_key = next(k for k, y in valid_t.items() if y == 1 and k[:2] == q)
+        g, t = feats[gold_key], feats[top.key]
+        if g.get("title_missing"):
+            tag = "gold_title_missing"
+        elif (t.get("title_jaccard") or 0) >= (g.get("title_jaccard") or 0):
+            tag = "near_duplicate_title"
+        else:
+            tag = "other_signal_outweighed"
+        tags[tag] += 1
+        cases.append(dict(arxiv_id=q[0], citation_key=q[1], gold_rank=rank,
+                          top1=top.ref_arxiv_id, gold=gold_key[2], tag=tag))
+    return dict(n_errors=len(cases), n_queries=len(ranks), tags=dict(tags), examples=cases[:limit])
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--mock", action="store_true", required=True,
+                    help="Only synthetic mode until real data is handed over (TODO T4-04)")
+    ap.add_argument("--kind", default="logreg")
+    ap.add_argument("--seed", type=int, default=0)
+    args = ap.parse_args(argv)
+    batch, labels, manifest = mock_dataset(args.seed)
+    tr_all, va_all = (partition_batch(batch, manifest, p) for p in ("train", "valid"))
+    tr_t, va_t = targets_from_labels(tr_all, labels), targets_from_labels(va_all, labels)
+    tr = FeatureBatch([r for r in tr_all.rows if r.key in tr_t], batch.feature_schema_id)
+    va = FeatureBatch([r for r in va_all.rows if r.key in va_t], batch.feature_schema_id)
+    config = dict(kind=args.kind, seed=args.seed)
+    art = fit_model(tr, tr_t, va, va_t, config)
+    out = dict(note="SYNTHETIC MOCK DATA - not experimental results", model_id=art.model_id,
+               ablation=ablation(tr, tr_t, va, va_t, config),
+               permutation_importance=permutation_importance(art, va, va_t, seed=args.seed),
+               slices=slices(art, va, va_t, labels),
+               errors=error_cases(art, va, va_t, limit=5))
+    print(json.dumps(out, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    main()

@@ -11,6 +11,7 @@ dependencies = ["requests>=2.31", "python-dotenv>=1.0", "bibtexparser>=1.4,<2"]
 
 [project.optional-dependencies]
 reporting = ["psutil>=5.9,<8"]
+matching = ["numpy>=1.26", "scikit-learn>=1.5", "joblib>=1.3", "lightgbm>=4.3"]
 dev = ["pytest>=8,<10"]
 
 [project.scripts]
