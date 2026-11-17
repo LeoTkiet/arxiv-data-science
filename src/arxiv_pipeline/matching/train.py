@@ -13,7 +13,7 @@ import random
 
 from arxiv_pipeline.matching.contracts import (
     ContractError, FeatureBatch, LabelRecord, PairFeature, PairKey, PartitionManifest,
-    PartitionRow,
+    PartitionRow, FeatureSchema, FeatureSpec,
 )
 from arxiv_pipeline.matching.model import (
     MODEL_KINDS, fit_model, mrr_at_5, predict_scores, save_artifact,
@@ -29,8 +29,29 @@ def targets_from_labels(batch: FeatureBatch, labels: list[LabelRecord], *,
     unmatched -> all 0; uncertain / unreviewed / unlabeled -> excluded.
     """
     usable = {l.key: l for l in labels if l.is_supervised and l.label_source in allow_sources}
-    return {row.key: int(row.ref_arxiv_id == usable[row.key[:2]].groundtruth_arxiv_id)
-            for row in batch.rows if row.key[:2] in usable}
+    targets = {row.key: int(row.ref_arxiv_id == usable[row.key[:2]].groundtruth_arxiv_id)
+               for row in batch.rows if row.key[:2] in usable}
+    # A matched query whose groundtruth pair is absent would silently become an
+    # all-negative row (a fake "unmatched"); contract treats it as an error.
+    present = {k[:2] for k, y in targets.items() if y == 1}
+    with_rows = {k[:2] for k in targets}
+    lost = sorted(q for q, l in usable.items() if l.decision == "matched"
+                  and q not in present and q in with_rows)
+    if lost:
+        raise ContractError(f"groundtruth_outside_candidates for {len(lost)} queries, e.g. {lost[0]}")
+    return targets
+
+
+def labeled_queries(labels: list[LabelRecord], publications, *,
+                    allow_sources=("manual", "heuristic")) -> set[tuple[str, str]]:
+    """Registry of validly labeled queries (matched/unmatched, accepted) in `publications`.
+
+    Includes queries with zero candidates, which have no pair targets but still
+    count in the MRR@5 denominator (contract section 7).
+    """
+    pubs = set(publications)
+    return {l.key for l in labels if l.is_supervised and l.arxiv_id in pubs
+            and l.label_source in allow_sources}
 
 
 def partition_batch(batch: FeatureBatch, manifest: PartitionManifest, partition: str,
@@ -43,7 +64,8 @@ def partition_batch(batch: FeatureBatch, manifest: PartitionManifest, partition:
 
 def train_and_compare(batch: FeatureBatch, labels: list[LabelRecord],
                       manifest: PartitionManifest, *, kinds=("logreg", "hgb"),
-                      seed=0, neg_per_query=None, use_silver=True, evaluator=mrr_at_5):
+                      seed=0, neg_per_query=None, use_silver=True, evaluator=mrr_at_5,
+                      feature_schema: FeatureSchema | None = None):
     """Fit each model family on train, tune on valid; never reads test.
 
     Returns (best_artifact, report). Model choice uses valid MRR@5 only; test is
@@ -58,13 +80,17 @@ def train_and_compare(batch: FeatureBatch, labels: list[LabelRecord],
     valid_b = partition_batch(batch, manifest, "valid", only_keys=valid_t)
     provenance = dict(split_id=manifest.split_id, label_snapshot_id=manifest.label_snapshot_id,
                       use_silver=use_silver)
+    pubs = lambda p: [r.arxiv_id for r in manifest.rows if r.partition == p]
+    train_q = labeled_queries(labels, pubs("train"), allow_sources=sources)
+    valid_q = labeled_queries(labels, pubs("valid"))
     report, best = [], None
     for kind in kinds:
         art = fit_model(train_b, train_t, valid_b, valid_t,
                         dict(kind=kind, seed=seed, neg_per_query=neg_per_query,
-                             provenance=provenance, evaluator=evaluator))
+                             provenance=provenance, evaluator=evaluator,
+                             valid_queries=valid_q, feature_schema=feature_schema))
         row = dict(kind=kind, model_id=art.model_id, params=art.params,
-                   train_mrr_at_5=evaluator(predict_scores(art, train_b), train_t),
+                   train_mrr_at_5=evaluator(predict_scores(art, train_b), train_t, queries=train_q),
                    valid_mrr_at_5=max(s["valid_mrr_at_5"] for s in art.selection))
         report.append(row)
         if best is None or row["valid_mrr_at_5"] > best[0]:
@@ -75,6 +101,18 @@ def train_and_compare(batch: FeatureBatch, labels: list[LabelRecord],
 # ------------------------------------------------------------- synthetic mock data
 MOCK_COLUMNS = ("title_jaccard", "title_char_sim", "author_overlap",
                 "year_abs_diff", "has_doi_match", "title_missing")
+
+
+def mock_feature_schema() -> FeatureSchema:
+    """Contract-valid schema for the synthetic columns (mock runs only)."""
+    def spec(name, dtype, lo, hi, nullable=True):
+        return FeatureSpec(name, dtype, nullable, lo, hi, "synthetic; null when missing",
+                           "synthetic mock feature", ["mock"])
+    return FeatureSchema([
+        spec("title_jaccard", "float64", 0.0, 1.0), spec("title_char_sim", "float64", 0.0, 1.0),
+        spec("author_overlap", "float64", 0.0, 1.0), spec("year_abs_diff", "int64", 0, None),
+        spec("has_doi_match", "bool", None, None), spec("title_missing", "bool", None, None, False),
+    ])
 
 
 def mock_dataset(seed=0, n_manual=25, n_auto=12, queries=(20, 30), refs=(15, 35)):
@@ -144,7 +182,7 @@ def mock_dataset(seed=0, n_manual=25, n_auto=12, queries=(20, 30), refs=(15, 35)
     manifest = PartitionManifest(seed, 5, "mock-population", "mock-labels-1", manual, auto,
                                  [PartitionRow(pid, part[pid], "manual" if pid in manual else "auto")
                                   for pid in pubs])
-    return FeatureBatch(rows, "mock-schema-1"), labels, manifest
+    return FeatureBatch(rows, mock_feature_schema().schema_id), labels, manifest
 
 
 def main(argv=None):
@@ -157,7 +195,8 @@ def main(argv=None):
                     choices=MODEL_KINDS)
     args = ap.parse_args(argv)
     batch, labels, manifest = mock_dataset(args.seed)
-    best, report = train_and_compare(batch, labels, manifest, kinds=args.kinds, seed=args.seed)
+    best, report = train_and_compare(batch, labels, manifest, kinds=args.kinds, seed=args.seed,
+                                     feature_schema=mock_feature_schema())
     path = save_artifact(best, Path(args.out) / "models")
     out = dict(note="SYNTHETIC MOCK DATA - not experimental results",
                split_counts=manifest.counts, models=report, selected=best.model_id,

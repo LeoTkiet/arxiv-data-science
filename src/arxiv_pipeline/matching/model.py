@@ -19,12 +19,16 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import os
 import platform
+import shutil
+import subprocess
+import tempfile
 import random
 from typing import Callable
 
 from arxiv_pipeline.matching.contracts import (
-    ContractError, FeatureBatch, PairKey, ScoreRecord,
+    ContractError, FeatureBatch, FeatureSchema, PairKey, ScoreRecord, validate_features,
 )
 
 MODEL_KINDS = ("logreg", "rf", "hgb", "lambdamart")
@@ -40,25 +44,32 @@ DEFAULT_GRIDS = {
 
 
 # --------------------------------------------------------------------------- metric
-def mrr_at_5(scores: list[ScoreRecord], targets: dict[PairKey, int]) -> float:
-    """Provisional MRR@5 for model selection on mock/valid data.
+def mrr_at_5(scores: list[ScoreRecord], targets: dict[PairKey, int], *,
+             queries=None) -> float:
+    """Provisional MRR@5 following docs/MS3_CONTRACTS.md section 7.
 
-    TV5 owns the official evaluator; this local copy follows the same rule:
-    rank by score desc, ties by ref_arxiv_id asc; reciprocal rank is 0 when the
-    positive is not in the top 5. Only queries with a positive count.
+    TV5 owns the official evaluator. Denominator = every validly labeled query:
+    the queries present in `targets` (matched or unmatched) plus `queries`, the
+    labeled query keys from the registry (needed for queries with 0 candidates,
+    which have no pair targets). No-hit and unmatched queries score 0 but stay
+    in the denominator. Rank by score desc, ties by ref_arxiv_id asc. An empty
+    query set is an error, never MRR=0.
     """
     by_query: dict[tuple[str, str], list[ScoreRecord]] = {}
     for s in scores:
         by_query.setdefault((s.arxiv_id, s.citation_key), []).append(s)
-    positives = {k[:2]: k[2] for k, y in targets.items() if y == 1}
-    if not positives:
-        raise ContractError("MRR@5 needs at least one query with a positive")
+    labeled = {k[:2] for k in targets} | set(queries or ())
+    if not labeled:
+        raise ContractError("MRR@5 needs at least one labeled query")
+    gold = {k[:2]: k[2] for k, y in targets.items() if y == 1}
     total = 0.0
-    for query, gold in positives.items():
+    for query in labeled:
+        if query not in gold:
+            continue  # unmatched or no candidates: reciprocal rank 0
         ranked = sorted(by_query.get(query, []), key=lambda s: (-s.score, s.ref_arxiv_id))
         top = [s.ref_arxiv_id for s in ranked[:5]]
-        total += 1.0 / (top.index(gold) + 1) if gold in top else 0.0
-    return total / len(positives)
+        total += 1.0 / (top.index(gold[query]) + 1) if gold[query] in top else 0.0
+    return total / len(labeled)
 
 
 # ------------------------------------------------------------------- feature matrix
@@ -108,7 +119,10 @@ def _sample_negatives(keys, y, per_query: int | None, seed: int):
     for i, k in enumerate(keys):
         groups.setdefault(k[:2], []).append(i)
     keep = []
-    for idx in groups.values():
+    # Iterate queries and negatives in key order so the sample depends only on
+    # (seed, data), never on the incoming row order.
+    for q in sorted(groups):
+        idx = sorted(groups[q], key=lambda i: keys[i])
         pos = [i for i in idx if y[i] == 1]
         neg = [i for i in idx if y[i] == 0]
         keep += pos + (neg if len(neg) <= per_query else rng.sample(neg, per_query))
@@ -176,6 +190,8 @@ class ModelArtifact:
     selection: list[dict] = field(default_factory=list)
     provenance: dict = field(default_factory=dict)
     versions: dict = field(default_factory=dict)
+    feature_schema: dict | None = None  # TV2 FeatureSchema used at train time
+    source_version: str | None = None   # git commit of the training code
 
     @property
     def model_id(self) -> str:
@@ -190,7 +206,27 @@ class ModelArtifact:
                     feature_columns=self.feature_columns,
                     feature_schema_id=self.feature_schema_id, seed=self.seed,
                     neg_per_query=self.neg_per_query, selection=self.selection,
-                    provenance=self.provenance, versions=self.versions)
+                    provenance=self.provenance, versions=self.versions,
+                    feature_schema=self.feature_schema, source_version=self.source_version)
+
+
+def _source_version() -> str | None:
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+                             cwd=Path(__file__).resolve().parent, timeout=5)
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                               capture_output=True, text=True,
+                               cwd=Path(__file__).resolve().parent, timeout=5).stdout.strip()
+        return out.stdout.strip() + ("-dirty" if dirty else "") if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _check_schema(batch: FeatureBatch, schema: FeatureSchema, name: str):
+    report = validate_features(batch, schema)
+    if not report.valid:
+        codes = sorted({i.code for i in report.errors})
+        raise ContractError(f"{name} features violate the feature schema: {codes}")
 
 
 def _versions() -> dict:
@@ -211,9 +247,12 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
               config: dict) -> ModelArtifact:
     """Fit one model family, choosing hyperparameters by MRR@5 on valid only.
 
-    config keys: kind (required), seed=0, grid=DEFAULT_GRIDS[kind],
+    config keys: kind (required), feature_schema (TV2 FeatureSchema; required for
+    real data - fixes column order and is validated + stored in the artifact;
+    omitted only for synthetic mock batches), seed=0, grid=DEFAULT_GRIDS[kind],
     neg_per_query=None, provenance={} (split_id, label_snapshot_id, ...),
-    evaluator=mrr_at_5 (inject TV5's evaluator: f(scores, valid_targets)->float).
+    evaluator=mrr_at_5 (inject TV5's evaluator: f(scores, valid_targets, queries=)->float),
+    valid_queries=None (labeled valid query keys, incl. queries with 0 candidates).
     The refit-on-train+valid step is intentionally absent: the artifact is the
     exact model that was validated.
     """
@@ -224,7 +263,16 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
     evaluator: Callable = config.get("evaluator", mrr_at_5)
     if train_features.feature_schema_id != valid_features.feature_schema_id:
         raise ContractError("Train/valid feature schema IDs differ")
-    columns = feature_columns(train_features)
+    schema: FeatureSchema | None = config.get("feature_schema")
+    if schema is not None:
+        if schema.schema_id != train_features.feature_schema_id:
+            raise ContractError("Feature schema ID differs from the training batch")
+        _check_schema(train_features, schema, "train")
+        _check_schema(valid_features, schema, "valid")
+        columns = [spec.name for spec in schema.features]  # order fixed by TV2
+    else:
+        columns = feature_columns(train_features)
+    source_version = _source_version()
 
     keys, X = _matrix(train_features, columns)
     y = _targets_for(keys, train_targets)
@@ -238,8 +286,11 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
         est = _fit(_build(kind, params, seed), kind, keys_s, X_s, y_s)
         art = ModelArtifact(est, kind, dict(params), columns, train_features.feature_schema_id,
                             seed, neg, provenance=dict(config.get("provenance", {})),
-                            versions=_versions())
-        score = evaluator(predict_scores(art, valid_features), valid_targets)
+                            versions=_versions(),
+                            feature_schema=schema.to_dict() if schema is not None else None,
+                            source_version=source_version)
+        score = evaluator(predict_scores(art, valid_features), valid_targets,
+                          queries=config.get("valid_queries"))
         selection.append(dict(params=params, valid_mrr_at_5=score))
         # Strict '>' keeps the earlier (simpler, listed first) config on ties.
         if best is None or score > best[0]:
@@ -266,13 +317,29 @@ def predict_scores(model_artifact: ModelArtifact, feature_batch: FeatureBatch) -
 
 
 def save_artifact(artifact: ModelArtifact, root: str | Path) -> Path:
-    """Write models/<model_id>/model.joblib + metadata.json; return the directory."""
+    """Atomically publish models/<model_id>/{model.joblib,metadata.json}.
+
+    Files are written to a temp directory and renamed into place, so readers
+    never see a half-written artifact. model_id is a content hash: an existing
+    directory with the same id is reused after its metadata is verified.
+    """
     import joblib
-    directory = Path(root) / artifact.model_id
-    directory.mkdir(parents=True, exist_ok=True)
-    joblib.dump(artifact, directory / "model.joblib")
-    (directory / "metadata.json").write_text(
-        json.dumps(artifact.metadata(), indent=2, sort_keys=True, default=str), encoding="utf-8")
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    directory = root / artifact.model_id
+    if directory.exists():
+        load_artifact(directory)  # raises if the existing copy is inconsistent
+        return directory
+    tmp = Path(tempfile.mkdtemp(prefix=f".{artifact.model_id}.", dir=root))
+    try:
+        joblib.dump(artifact, tmp / "model.joblib")
+        (tmp / "metadata.json").write_text(
+            json.dumps(artifact.metadata(), indent=2, sort_keys=True, default=str,
+                       allow_nan=False), encoding="utf-8")
+        os.replace(tmp, directory)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp)
     return directory
 
 

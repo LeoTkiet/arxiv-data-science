@@ -5,12 +5,14 @@ import pytest
 
 pytest.importorskip("sklearn")
 
-from arxiv_pipeline.matching.contracts import ContractError, FeatureBatch, PairFeature
+from arxiv_pipeline.matching.contracts import (
+    ContractError, FeatureBatch, FeatureSchema, PairFeature,
+)
 from arxiv_pipeline.matching.model import (
     fit_model, load_artifact, mrr_at_5, predict_scores, save_artifact,
 )
 from arxiv_pipeline.matching.train import (
-    mock_dataset, partition_batch, targets_from_labels, train_and_compare,
+    mock_dataset, mock_feature_schema, partition_batch, targets_from_labels, train_and_compare,
 )
 
 SMALL = dict(n_manual=11, n_auto=11, queries=(4, 6), refs=(6, 10))
@@ -103,9 +105,9 @@ def test_test_publications_never_reach_training(data):
     test_pubs = {r.arxiv_id for r in manifest.rows if r.partition == "test"}
     assert test_pubs and not test_pubs & ({r.arxiv_id for r in tr.rows} | {r.arxiv_id for r in va.rows})
     seen = []
-    def spy(scores, targets):
+    def spy(scores, targets, queries=None):
         seen.extend(s.arxiv_id for s in scores)
-        return mrr_at_5(scores, targets)
+        return mrr_at_5(scores, targets, queries=queries)
     art, _ = train_and_compare(batch, labels, manifest, kinds=("logreg",), evaluator=spy)
     assert seen and not test_pubs & set(seen)
     assert art.provenance["split_id"] == manifest.split_id
@@ -138,6 +140,8 @@ def test_schema_mismatch_duplicates_rejected(data):
     art = _fit(data)
     with pytest.raises(ContractError):
         predict_scores(art, FeatureBatch(va.rows, "other-schema"))
+    with pytest.raises(ContractError):  # schema object must match the batch
+        _fit(data, feature_schema=FeatureSchema(mock_feature_schema().features[::-1]))
     with pytest.raises(ContractError):
         predict_scores(art, FeatureBatch(va.rows + va.rows[:1], va.feature_schema_id))
 
@@ -153,6 +157,44 @@ def test_mrr_at_5_rules():
     assert mrr_at_5(tied, t2) == 0.5  # ties broken by ref_arxiv_id asc
 
 
+def test_mrr_at_5_contract_denominator():
+    """Contract section 7: unmatched and no-candidate queries score 0 but count."""
+    from arxiv_pipeline.matching.contracts import ScoreRecord as S
+    hit, unm = ("2301.00001", "a"), ("2301.00001", "b")
+    t = {(*hit, "2001.00001"): 0, (*hit, "2001.00002"): 1,
+         (*unm, "2001.00001"): 0, (*unm, "2001.00002"): 0}
+    s = [S(*hit, "2001.00001", .9), S(*hit, "2001.00002", .5),
+         S(*unm, "2001.00001", .9), S(*unm, "2001.00002", .5)]
+    assert mrr_at_5(s, t) == 0.25  # (1/2 + 0) / 2, the contract example
+    assert mrr_at_5(s[2:], {k: v for k, v in t.items() if k[:2] == unm}) == 0.0
+    assert mrr_at_5(s, t, queries={("2301.00002", "empty")}) == pytest.approx(0.5 / 3)
+    with pytest.raises(ContractError):
+        mrr_at_5([], {})
+
+
+def test_lambdamart_groups_survive_shuffled_rows(data):
+    pytest.importorskip("lightgbm")
+    import random
+    _, _, _, tr, tr_t, va, va_t = data
+    rows = tr.rows[:]
+    random.Random(3).shuffle(rows)
+    cfg = dict(kind="lambdamart", seed=0, grid=[{"n_estimators": 30}], neg_per_query=3)
+    a = fit_model(tr, tr_t, va, va_t, cfg)
+    b = fit_model(FeatureBatch(rows, tr.feature_schema_id), tr_t, va, va_t, cfg)
+    assert [s.score for s in predict_scores(a, va)] == [s.score for s in predict_scores(b, va)]
+
+
+def test_feature_groups_match_tv2_schema():
+    from arxiv_pipeline.matching.analysis import FEATURE_GROUPS, MOCK_GROUPS, resolve_groups
+    official = [c for g in FEATURE_GROUPS.values() for c in g]
+    assert len(official) == len(set(official)) == 16
+    assert resolve_groups(official) == FEATURE_GROUPS
+    assert resolve_groups(["title_jaccard", "author_overlap"]) == {
+        "title": ["title_jaccard"], "author": ["author_overlap"]}
+    with pytest.raises(ValueError):
+        resolve_groups(["unknown_feature"])
+
+
 def test_analysis_runs_on_valid_only(data):
     from arxiv_pipeline.matching.analysis import ablation, error_cases, permutation_importance, slices
     _, labels, _, tr, tr_t, va, va_t = data
@@ -163,3 +205,31 @@ def test_analysis_runs_on_valid_only(data):
     assert all(v["n"] > 0 for v in slices(art, va, va_t, labels).values())
     errs = error_cases(art, va, va_t)
     assert errs["n_errors"] == sum(errs["tags"].values())
+
+
+def test_feature_schema_fixes_order_and_is_stored(data):
+    _, _, _, tr, tr_t, va, va_t = data
+    schema = mock_feature_schema()
+    art = _fit(data, feature_schema=schema)
+    assert art.feature_columns == [f.name for f in schema.features]
+    assert art.feature_schema["features"][0]["name"] == "title_jaccard"
+    assert art.feature_schema_id == schema.schema_id
+
+
+def test_matched_label_with_missing_gold_pair_is_an_error(data):
+    from arxiv_pipeline.matching.contracts import LabelRecord
+    _, labels, _, tr, _, _, _ = data
+    lab = next(l for l in labels if l.decision == "matched" and l.is_supervised
+               and l.arxiv_id in {r.arxiv_id for r in tr.rows})
+    rows = [r for r in tr.rows if r.key != (*lab.key, lab.groundtruth_arxiv_id)]
+    with pytest.raises(ContractError, match="groundtruth_outside_candidates"):
+        targets_from_labels(FeatureBatch(rows, tr.feature_schema_id), labels)
+
+
+def test_save_is_atomic_and_idempotent(data, tmp_path):
+    art = _fit(data)
+    d1 = save_artifact(art, tmp_path)
+    d2 = save_artifact(art, tmp_path)
+    assert d1 == d2 and sorted(p.name for p in tmp_path.iterdir()) == [art.model_id]
+    meta = __import__("json").loads((d1 / "metadata.json").read_text())
+    assert "source_version" in meta and "feature_schema" in meta

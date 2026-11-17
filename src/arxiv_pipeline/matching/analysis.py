@@ -5,7 +5,8 @@ config is frozen. Runs on mock data today:
     python -m arxiv_pipeline.matching.analysis --mock
 
 TODO(T4-04, blocked on real data):
-- Replace mock feature groups with TV2's feature_schema.json groups (T2-03).
+- Official TV2 group names are wired in (FEATURE_GROUPS); re-check if TV2's
+  schema changes after PR #24 merges.
 - Swap mrr_at_5 for TV5's official evaluator (T5-02) and confirm how labeled
   "unmatched" entries count in MRR@5.
 - Add slices on real metadata: missing DOI/title, entry_type, publication size,
@@ -27,13 +28,31 @@ from arxiv_pipeline.matching.train import (
     mock_dataset, partition_batch, targets_from_labels,
 )
 
-# TODO(T2-03): read groups from TV2's feature schema instead of this mock map.
+FEATURE_GROUPS = {
+    "title": ["title_exact_match", "title_jaccard_word", "title_levenshtein_ratio",
+              "title_char_ngram_cosine", "title_len_diff_ratio"],
+    "author": ["author_jaccard_last", "first_author_match", "author_count_diff"],
+    "identifier": ["doi_exact_match", "has_doi_both", "arxiv_id_match"],
+    "temporal": ["year_exact_match", "year_diff_abs", "year_is_chronological",
+                 "is_bib_year_missing", "is_ref_year_missing"],
+}
 MOCK_GROUPS = {
     "title": ["title_jaccard", "title_char_sim", "title_missing"],
     "author": ["author_overlap"],
-    "year": ["year_abs_diff"],
+    "temporal": ["year_abs_diff"],
     "identifier": ["has_doi_match"],
 }
+
+
+def resolve_groups(columns) -> dict[str, list[str]]:
+    """Pick the group map matching the batch; fail loudly on unknown columns."""
+    cols = set(columns)
+    for groups in (FEATURE_GROUPS, MOCK_GROUPS):
+        known = {c for g in groups.values() for c in g}
+        if cols <= known:
+            return {k: [c for c in v if c in cols] for k, v in groups.items()
+                    if any(c in cols for c in v)}
+    raise ValueError(f"Columns without a feature group: {sorted(cols - {c for g in FEATURE_GROUPS.values() for c in g})}")
 
 
 def _subset(batch: FeatureBatch, keep: list[str]) -> FeatureBatch:
@@ -56,9 +75,10 @@ def _rank_of_gold(scores, targets):
     return out
 
 
-def ablation(train, train_t, valid, valid_t, config, groups=MOCK_GROUPS):
+def ablation(train, train_t, valid, valid_t, config, groups=None):
     """Drop one feature group at a time; report valid MRR@5 delta vs all features."""
     cols = list(train.rows[0].values)
+    groups = groups or resolve_groups(cols)
     full = mrr_at_5(predict_scores(fit_model(train, train_t, valid, valid_t, config), valid), valid_t)
     rows = [dict(dropped=None, valid_mrr_at_5=full, delta=0.0)]
     for name, group in groups.items():
