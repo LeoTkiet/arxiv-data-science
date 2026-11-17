@@ -22,7 +22,7 @@ import json
 import random
 from collections import Counter, defaultdict
 
-from arxiv_pipeline.matching.contracts import FeatureBatch, PairFeature
+from arxiv_pipeline.matching.contracts import FeatureBatch, FeatureSchema, PairFeature
 from arxiv_pipeline.matching.model import fit_model, mrr_at_5, predict_scores
 from arxiv_pipeline.matching.train import (
     mock_dataset, partition_batch, targets_from_labels,
@@ -55,10 +55,22 @@ def resolve_groups(columns) -> dict[str, list[str]]:
     raise ValueError(f"Columns without a feature group: {sorted(cols - {c for g in FEATURE_GROUPS.values() for c in g})}")
 
 
-def _subset(batch: FeatureBatch, keep: list[str]) -> FeatureBatch:
+def _subset(batch: FeatureBatch, keep: list[str], schema=None):
+    """Batch restricted to `keep`; with a schema, build the matching sub-schema.
+
+    Returns (batch, sub_schema). The sub-schema keeps TV2's specs and order, so
+    the batch ID equals sub_schema.schema_id and fit_model validates it.
+    """
+    sub = None
+    if schema is not None:
+        sub = FeatureSchema([f for f in schema.features if f.name in keep], schema.schema_version)
+        keep = [f.name for f in sub.features]
+        schema_id = sub.schema_id
+    else:
+        schema_id = f"{batch.feature_schema_id}:{','.join(keep)}"
     rows = [PairFeature(r.arxiv_id, r.citation_key, r.ref_arxiv_id,
                         {k: r.values[k] for k in keep}) for r in batch.rows]
-    return FeatureBatch(rows, f"{batch.feature_schema_id}:{','.join(keep)}")
+    return FeatureBatch(rows, schema_id), sub
 
 
 def _rank_of_gold(scores, targets):
@@ -79,14 +91,19 @@ def ablation(train, train_t, valid, valid_t, config, groups=None):
     """Drop one feature group at a time; report valid MRR@5 delta vs all features."""
     cols = list(train.rows[0].values)
     groups = groups or resolve_groups(cols)
-    full = mrr_at_5(predict_scores(fit_model(train, train_t, valid, valid_t, config), valid), valid_t)
+    full = mrr_at_5(predict_scores(fit_model(train, train_t, valid, valid_t, config), valid),
+                    valid_t, queries=config.get("valid_queries"))
     rows = [dict(dropped=None, valid_mrr_at_5=full, delta=0.0)]
     for name, group in groups.items():
         keep = [c for c in cols if c not in group]
         if not keep:
             continue
-        tr, va = _subset(train, keep), _subset(valid, keep)
-        m = mrr_at_5(predict_scores(fit_model(tr, train_t, va, valid_t, config), va), valid_t)
+        schema = config.get("feature_schema")
+        tr, sub = _subset(train, keep, schema)
+        va, _ = _subset(valid, keep, schema)
+        cfg = dict(config, feature_schema=sub) if schema is not None else config
+        m = mrr_at_5(predict_scores(fit_model(tr, train_t, va, valid_t, cfg), va), valid_t,
+                     queries=config.get("valid_queries"))
         rows.append(dict(dropped=name, valid_mrr_at_5=m, delta=m - full))
     return rows
 
@@ -108,8 +125,18 @@ def permutation_importance(artifact, valid, valid_t, *, repeats=5, seed=0):
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
+# Boolean missingness/availability columns to slice on, if present in the batch
+# (TV2 official names first, synthetic mock names last).
+SLICE_COLUMNS = ("is_bib_year_missing", "is_ref_year_missing", "has_doi_both",
+                 "title_missing", "has_doi_match")
+
+
 def slices(artifact, valid, valid_t, labels):
-    """MRR@5 per slice of the gold pair: title missing, DOI known, label pool."""
+    """MRR@5 per slice of the gold pair: missingness flags present + label pool.
+
+    Only columns that exist in the batch are used, so absent columns never
+    produce a fake all-False slice.
+    """
     ranks = _rank_of_gold(predict_scores(artifact, valid), valid_t)
     gold = {k: r for k, r in ((row.key, row) for row in valid.rows) if valid_t.get(k) == 1}
     source = {l.key: l.label_source for l in labels}
@@ -117,8 +144,11 @@ def slices(artifact, valid, valid_t, labels):
     for key, row in gold.items():
         rr = ranks[key[:2]][0]
         score = 1 / rr if rr <= 5 else 0.0
-        buckets[f"title_missing={bool(row.values.get('title_missing'))}"].append(score)
-        buckets[f"doi_known={row.values.get('has_doi_match') is not None}"].append(score)
+        for col in SLICE_COLUMNS:
+            if col in row.values:
+                value = row.values[col]
+                label = "null" if value is None else bool(value)
+                buckets[f"{col}={label}"].append(score)
         buckets[f"label_source={source.get(key[:2])}"].append(score)
     return {k: dict(n=len(v), mrr_at_5=sum(v) / len(v)) for k, v in sorted(buckets.items())}
 

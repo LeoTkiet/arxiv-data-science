@@ -28,7 +28,12 @@ def targets_from_labels(batch: FeatureBatch, labels: list[LabelRecord], *,
     matched -> 1 for the groundtruth pair, 0 for other candidates of that query;
     unmatched -> all 0; uncertain / unreviewed / unlabeled -> excluded.
     """
-    usable = {l.key: l for l in labels if l.is_supervised and l.label_source in allow_sources}
+    usable = {}
+    for l in labels:
+        if l.is_supervised and l.label_source in allow_sources:
+            if l.key in usable:  # contract: one decision per query
+                raise ContractError(f"duplicate_label for query {l.key}")
+            usable[l.key] = l
     targets = {row.key: int(row.ref_arxiv_id == usable[row.key[:2]].groundtruth_arxiv_id)
                for row in batch.rows if row.key[:2] in usable}
     # A matched query whose groundtruth pair is absent would silently become an

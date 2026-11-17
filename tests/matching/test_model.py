@@ -233,3 +233,78 @@ def test_save_is_atomic_and_idempotent(data, tmp_path):
     assert d1 == d2 and sorted(p.name for p in tmp_path.iterdir()) == [art.model_id]
     meta = __import__("json").loads((d1 / "metadata.json").read_text())
     assert "source_version" in meta and "feature_schema" in meta
+
+
+def test_different_labels_give_different_model_and_no_stale_reuse(data, tmp_path):
+    """Review P1: same config + different labels must not reuse the old artifact."""
+    _, _, _, tr, tr_t, va, va_t = data
+    flipped = {k: (1 - v if i % 7 == 0 else v) for i, (k, v) in enumerate(tr_t.items())}
+    cfg = dict(kind="logreg", seed=0, grid=[{"C": 1.0}])
+    a1 = fit_model(tr, tr_t, va, va_t, cfg)
+    a2 = fit_model(tr, flipped, va, va_t, cfg)
+    assert a1.model_id != a2.model_id and a1.data_fingerprint != a2.data_fingerprint
+    save_artifact(a1, tmp_path)
+    loaded = load_artifact(save_artifact(a2, tmp_path))
+    assert [s.score for s in predict_scores(loaded, va)] == [s.score for s in predict_scores(a2, va)]
+    shuffled = FeatureBatch(tr.rows[::-1], tr.feature_schema_id)
+    assert fit_model(shuffled, tr_t, va, va_t, cfg).model_id == a1.model_id
+
+
+def test_ablation_with_feature_schema(data):
+    """Review P2: dropping a group must use a matching sub-schema."""
+    from arxiv_pipeline.matching.analysis import ablation
+    _, _, _, tr, tr_t, va, va_t = data
+    cfg = dict(kind="logreg", seed=0, grid=[{"C": 1.0}], feature_schema=mock_feature_schema())
+    rows = ablation(tr, tr_t, va, va_t, cfg)
+    assert [r["dropped"] for r in rows] == [None, "title", "author", "temporal", "identifier"]
+
+
+def test_mrr_at_5_is_independent_of_input_order():
+    from arxiv_pipeline.matching.contracts import ScoreRecord as S
+    import random
+    rng = random.Random(0)
+    t, s = {}, []
+    for q in range(200):
+        key = ("2301.00001", f"k{q}")
+        gold = rng.randint(1, 7)
+        for r in range(1, 8):
+            t[(*key, f"2001.{r:05d}")] = int(r == gold and q % 5)
+            s.append(S(*key, f"2001.{r:05d}", rng.random()))
+    base = mrr_at_5(s, t)
+    for _ in range(5):
+        items = list(t.items()); rng.shuffle(items); rng.shuffle(s)
+        assert mrr_at_5(s, dict(items)) == base  # exact, not approx
+
+
+def test_duplicate_labels_and_bad_sampling_rejected(data):
+    _, labels, _, tr, tr_t, va, va_t = data
+    dup = next(l for l in labels if l.is_supervised)
+    with pytest.raises(ContractError, match="duplicate_label"):
+        targets_from_labels(tr, labels + [dup])
+    with pytest.raises(ContractError, match="neg_per_query"):
+        _fit(data, neg_per_query=-1)
+
+
+def test_slices_use_only_present_columns(data):
+    from arxiv_pipeline.matching.analysis import slices
+    _, labels, _, _, _, va, va_t = data
+    out = slices(_fit(data), va, va_t, labels)
+    assert not any(k.startswith(("is_bib_year_missing", "has_doi_both")) for k in out)
+    assert any(k.startswith("title_missing=") for k in out)
+
+
+def test_valid_rows_of_unlabeled_queries_are_allowed(data):
+    """code-review: valid batches may keep rows of unlabeled queries."""
+    batch, labels, manifest, tr, tr_t, va, va_t = data
+    va_full = partition_batch(batch, manifest, "valid")
+    assert len(va_full.rows) > len(va.rows)
+    art = fit_model(tr, tr_t, va_full, va_t, dict(kind="logreg", seed=0, grid=[{"C": 1.0}]))
+    assert len(predict_scores(art, va_full)) == len(va_full.rows)
+
+
+def test_unfingerprinted_artifact_is_not_reused(data, tmp_path):
+    import dataclasses
+    legacy = dataclasses.replace(_fit(data), data_fingerprint="", code_fingerprint="")
+    save_artifact(legacy, tmp_path)
+    with pytest.raises(ContractError, match="no data fingerprint"):
+        save_artifact(legacy, tmp_path)

@@ -63,7 +63,7 @@ def mrr_at_5(scores: list[ScoreRecord], targets: dict[PairKey, int], *,
         raise ContractError("MRR@5 needs at least one labeled query")
     gold = {k[:2]: k[2] for k, y in targets.items() if y == 1}
     total = 0.0
-    for query in labeled:
+    for query in sorted(labeled):
         if query not in gold:
             continue  # unmatched or no candidates: reciprocal rank 0
         ranked = sorted(by_query.get(query, []), key=lambda s: (-s.score, s.ref_arxiv_id))
@@ -114,6 +114,8 @@ def _sample_negatives(keys, y, per_query: int | None, seed: int):
     """Keep every positive and at most `per_query` negatives per query (train only)."""
     if per_query is None:
         return list(range(len(keys)))
+    if type(per_query) is not int or per_query < 0:
+        raise ContractError("neg_per_query must be None or a non-negative int")
     rng = random.Random(seed)
     groups: dict[tuple[str, str], list[int]] = {}
     for i, k in enumerate(keys):
@@ -192,12 +194,15 @@ class ModelArtifact:
     versions: dict = field(default_factory=dict)
     feature_schema: dict | None = None  # TV2 FeatureSchema used at train time
     source_version: str | None = None   # git commit of the training code
+    data_fingerprint: str = ""          # hash of train/valid matrices, targets, grid
+    code_fingerprint: str = ""          # hash of the training code + library versions
 
     @property
     def model_id(self) -> str:
         payload = dict(kind=self.kind, params=self.params, columns=self.feature_columns,
                        schema=self.feature_schema_id, seed=self.seed,
-                       neg_per_query=self.neg_per_query, provenance=self.provenance)
+                       neg_per_query=self.neg_per_query, provenance=self.provenance,
+                       data=self.data_fingerprint, code=self.code_fingerprint)
         blob = json.dumps(payload, sort_keys=True, default=str).encode()
         return f"{self.kind}-{hashlib.sha256(blob).hexdigest()[:12]}"
 
@@ -207,7 +212,9 @@ class ModelArtifact:
                     feature_schema_id=self.feature_schema_id, seed=self.seed,
                     neg_per_query=self.neg_per_query, selection=self.selection,
                     provenance=self.provenance, versions=self.versions,
-                    feature_schema=self.feature_schema, source_version=self.source_version)
+                    feature_schema=self.feature_schema, source_version=self.source_version,
+                    data_fingerprint=self.data_fingerprint,
+                    code_fingerprint=self.code_fingerprint)
 
 
 def _source_version() -> str | None:
@@ -220,6 +227,26 @@ def _source_version() -> str | None:
         return out.stdout.strip() + ("-dirty" if dirty else "") if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def _code_fingerprint() -> str:
+    h = hashlib.sha256(Path(__file__).read_bytes())
+    h.update(json.dumps(_versions(), sort_keys=True).encode())
+    return h.hexdigest()
+
+
+def _data_fingerprint(train_keys, X_train, y_train, valid_keys, X_valid, valid_targets,
+                      valid_queries, grid) -> str:
+    """Hash of exactly what fit/selection saw (row order normalized by key)."""
+    h = hashlib.sha256()
+    for keys, X, y in ((train_keys, X_train, y_train),
+                       (valid_keys, X_valid, [valid_targets.get(k) for k in valid_keys])):
+        order = sorted(range(len(keys)), key=lambda i: keys[i])
+        h.update(json.dumps([[*keys[i], y[i]] for i in order]).encode())  # y may be None
+        h.update(X[order].tobytes() if order else b"")
+    h.update(json.dumps(sorted(map(list, valid_queries or ()))).encode())
+    h.update(json.dumps(grid, sort_keys=True, default=str).encode())
+    return h.hexdigest()
 
 
 def _check_schema(batch: FeatureBatch, schema: FeatureSchema, name: str):
@@ -273,6 +300,7 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
     else:
         columns = feature_columns(train_features)
     source_version = _source_version()
+    code_fp = _code_fingerprint()
 
     keys, X = _matrix(train_features, columns)
     y = _targets_for(keys, train_targets)
@@ -280,6 +308,9 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
     keys_s, X_s, y_s = [keys[i] for i in keep], X[keep], [y[i] for i in keep]
     if len(set(y_s)) < 2:
         raise ContractError("Training data needs both positive and negative pairs")
+    v_keys, X_v = _matrix(valid_features, columns)
+    data_fp = _data_fingerprint(keys_s, X_s, y_s, v_keys, X_v, valid_targets,
+                                config.get("valid_queries"), grid)
 
     best, selection = None, []
     for params in grid:
@@ -288,7 +319,8 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
                             seed, neg, provenance=dict(config.get("provenance", {})),
                             versions=_versions(),
                             feature_schema=schema.to_dict() if schema is not None else None,
-                            source_version=source_version)
+                            source_version=source_version,
+                            data_fingerprint=data_fp, code_fingerprint=code_fp)
         score = evaluator(predict_scores(art, valid_features), valid_targets,
                           queries=config.get("valid_queries"))
         selection.append(dict(params=params, valid_mrr_at_5=score))
@@ -328,7 +360,16 @@ def save_artifact(artifact: ModelArtifact, root: str | Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     directory = root / artifact.model_id
     if directory.exists():
-        load_artifact(directory)  # raises if the existing copy is inconsistent
+        # model_id covers config + data + labels + code, so a match means the
+        # same model; still verify the stored fingerprints before reusing it.
+        existing = load_artifact(directory)
+        if not artifact.data_fingerprint or not existing.data_fingerprint:
+            raise ContractError(f"Refusing to reuse {directory}: artifact has no data "
+                                "fingerprint (built outside fit_model or by an older version); "
+                                "retrain with fit_model or save to a fresh root")
+        if (existing.data_fingerprint, existing.code_fingerprint) != \
+                (artifact.data_fingerprint, artifact.code_fingerprint):
+            raise ContractError(f"Refusing to reuse {directory}: fingerprints differ")
         return directory
     tmp = Path(tempfile.mkdtemp(prefix=f".{artifact.model_id}.", dir=root))
     try:
