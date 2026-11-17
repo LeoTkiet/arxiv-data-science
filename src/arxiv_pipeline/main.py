@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from arxiv_pipeline.common.config import APIConfig
@@ -29,6 +30,10 @@ def expand_range(value):
 
 
 def main(argv=None, *, client=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'matching':
+        from arxiv_pipeline.matching.cli import main as matching_main
+        return matching_main(argv[1:])
     parser = argparse.ArgumentParser(description="Coordinate MS1 crawling or offline MS2 parsing")
     parser.add_argument("--ids", nargs="+", default=[], help="IDs, arXiv URLs or comma-separated IDs")
     parser.add_argument("--input", type=Path, help="UTF-8 text, one ID per line; # comments accepted")

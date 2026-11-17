@@ -1,0 +1,21 @@
+name: Python tests and matching smoke
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -e '.[dev,reporting,matching]'
+      - run: python -m pytest -q
+        env:
+          OMP_NUM_THREADS: '1'
+      - run: matching smoke --output artifacts/ms3-ci-smoke
+      - run: matching smoke --output artifacts/ms3-ci-smoke --resume
