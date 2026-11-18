@@ -9,8 +9,8 @@ chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại ce
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Notebook dùng mã production `40103bacb5c34a85baecaa16fc78a856044961e8`.
-Mỗi lô mặc định có 25 ID. Tối đa 32 luồng chép source/checkpoint cần thiết về
+Notebook cố định mã nguồn tại `CODE_REF` trong cell cấu hình.
+Mỗi lô mặc định có 50 ID, dùng 8 luồng chép source/checkpoint cần thiết về
 `/content/arxiv_ms2_local`; parser và QA đọc/ghi trên ổ local. Snapshot MS1 cần
 được giữ cố định suốt lượt chạy. Source của lô được dọn sau khi lưu checkpoint,
 output local tích lũy để tạo ZIP cuối. Cần đủ dung lượng cho source một lô,
@@ -22,6 +22,14 @@ cell dừng hẳn. Mở notebook mới trong runtime sạch, giữ nguyên `MEMB
 PR #20 hợp lệ được dùng lại sau kiểm tra hash. Cell parsing in giai đoạn chép
 dữ liệu, số ID đã lưu trên Drive, giây/ID trong lô và số stage dùng cache.
 Lượt tiếp theo có thể tiếp tục từ cả file checkpoint cũ lẫn gói checkpoint mới.
+Chạy mới không cần có sẵn `completion-index.json`: notebook tự tạo index.
+Checkpoint cũ tương thích được chuyển sang index một lần, kể cả kết quả kiểm
+tra không đạt để tránh mở lại cùng ZIP chỉ để xác minh ở mỗi lần resume.
+Khi snapshot giữ nguyên, các bài đã qua validation được bỏ qua mà không chép
+lại source. Notebook ưu tiên ID mới, sau đó thử lại bài có receipt chưa hoàn tất.
+Index hoặc receipt khác context sẽ làm notebook dừng trước khi sửa output.
+Muốn xử lý snapshot đã thay đổi, dùng `RUN_TAG` mới trong phần cấu hình ẩn;
+giữ `RUN_TAG='ms2-members-20261110'` để tiếp tục đúng kết quả mặc định cũ.
 
 `acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
 cảnh báo. Output tách theo `<OUTPUT_ROOT>/<RUN_TAG>/<smoke|full>/<MEMBER>/`;
@@ -39,7 +47,8 @@ này để bàn giao kết quả mới; các thư mục rời từ lượt cũ m
 `delivery.json` có trạng thái published và SHA-256 của ZIP đã xuất.
 
 Thời gian benchmark gồm đọc discovery, chép input, khôi phục checkpoint,
-parsing/QA local và lưu gói theo lô. Thời gian đóng gói/upload ZIP cuối ghi riêng
+parsing/QA local, lưu gói theo lô và thu thập output cũ. RAM đo trong bước
+discovery và xử lý bài còn lại. Thời gian đóng gói/upload ZIP cuối ghi riêng
 trong delivery. Số stage dùng cache được ghi trong acceptance. SMOKE kiểm tra
 resume thêm trên local; FULL có thể bật `VERIFY_RESUME` nếu cần.
 Notebook này chưa được thực thi trên Colab trong lần nghiệm thu local.
