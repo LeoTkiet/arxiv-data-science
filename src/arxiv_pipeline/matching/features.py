@@ -7,7 +7,6 @@ Strictly adheres to FeatureSchema (v3.0) and validates with contracts.validate_f
 from __future__ import annotations
 
 from collections import Counter
-import difflib
 import math
 from typing import Any
 
@@ -29,9 +28,40 @@ from arxiv_pipeline.matching.contracts import (
     PairFeature,
     PublicationBundle,
     ReferenceInput,
+    validate_features,
 )
 
-# Optional rapidfuzz for accelerated Levenshtein similarity, with difflib fallback
+
+def _levenshtein_ratio_pure(s1: str, s2: str) -> float:
+    """Compute exact, deterministic Levenshtein similarity ratio (substitution cost = 2).
+
+    Formula: (len(s1) + len(s2) - indel_distance) / (len(s1) + len(s2)).
+    Guarantees reproducible, bit-consistent results across all runtime environments.
+    """
+    if not s1 and not s2:
+        return 1.0
+    if not s1 or not s2:
+        return 0.0
+    if s1 == s2:
+        return 1.0
+
+    m, n = len(s1), len(s2)
+    if m < n:
+        s1, s2 = s2, s1
+        m, n = n, m
+
+    prev = list(range(n + 1))
+    for i, c1 in enumerate(s1, 1):
+        curr = [i] * (n + 1)
+        for j, c2 in enumerate(s2, 1):
+            cost = 0 if c1 == c2 else 2
+            curr[j] = min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost)
+        prev = curr
+    dist = prev[n]
+    return float((m + n - dist) / (m + n))
+
+
+# Optional rapidfuzz for SIMD acceleration, with mathematically identical pure-Python fallback
 try:
     import rapidfuzz.fuzz as rfuzz
 
@@ -40,16 +70,11 @@ try:
             return 1.0
         if not s1 or not s2:
             return 0.0
+        # rapidfuzz.fuzz.ratio uses the exact same indel distance formula: (m + n - dist) / (m + n)
         return float(rfuzz.ratio(s1, s2) / 100.0)
 
 except ImportError:
-
-    def _levenshtein_ratio(s1: str, s2: str) -> float:
-        if not s1 and not s2:
-            return 1.0
-        if not s1 or not s2:
-            return 0.0
-        return float(difflib.SequenceMatcher(None, s1, s2).ratio())
+    _levenshtein_ratio = _levenshtein_ratio_pure
 
 
 def _char_3grams(text: str) -> Counter[str]:
@@ -380,11 +405,22 @@ def build_feature_batch(
     bundles: list[PublicationBundle] | PublicationBundle,
     schema: FeatureSchema | None = None,
 ) -> FeatureBatch:
-    """Extract all candidate pair features for the given bundles into a validated FeatureBatch."""
+    """Extract all candidate pair features for the given bundles into a validated FeatureBatch.
+
+    Guarantees:
+    - Rejects incompatible/unsupported feature schemas.
+    - Validates batch against schema using contracts.validate_features before returning.
+    """
     if isinstance(bundles, PublicationBundle):
         bundles = [bundles]
+    default_schema = get_feature_schema()
     if schema is None:
-        schema = get_feature_schema()
+        schema = default_schema
+    elif schema.schema_id != default_schema.schema_id:
+        raise ContractError(
+            f"Unsupported feature schema: {schema.schema_id}. "
+            f"Expected registered schema {default_schema.schema_id}."
+        )
 
     rows: list[PairFeature] = []
     for bundle in bundles:
@@ -401,4 +437,9 @@ def build_feature_batch(
             for r in bundle.references:
                 rows.append(compute_pair_feature(b, r, citing_year=citing_year))
 
-    return FeatureBatch(rows=rows, feature_schema_id=schema.schema_id)
+    batch = FeatureBatch(rows=rows, feature_schema_id=schema.schema_id)
+    report = validate_features(batch, schema)
+    if not report.valid:
+        error_msgs = [f"{i.code}: {i.message}" for i in report.errors]
+        raise ContractError(f"Generated FeatureBatch failed validation: {'; '.join(error_msgs)}")
+    return batch

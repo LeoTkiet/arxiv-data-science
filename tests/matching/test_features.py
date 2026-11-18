@@ -102,3 +102,52 @@ def test_unmatched_and_missing_features():
     assert missing_feat["year_exact_match"] == 0
     assert missing_feat["year_diff_abs"] == 99.0
     assert missing_feat["title_exact_match"] == 0
+
+
+def test_levenshtein_ratio_determinism_and_reproducibility():
+    from arxiv_pipeline.matching.features import _levenshtein_ratio, _levenshtein_ratio_pure
+
+    # Reviewer case: 'tide' vs 'diet' must equal 0.5 deterministically
+    assert _levenshtein_ratio("tide", "diet") == 0.5
+    assert _levenshtein_ratio_pure("tide", "diet") == 0.5
+
+    # Check identical values between pure and optional accelerated implementations
+    test_pairs = [
+        ("", ""),
+        ("abc", ""),
+        ("", "xyz"),
+        ("identical string", "identical string"),
+        ("quantum computing", "quantum communication"),
+        ("neural network", "neural networks"),
+        ("attention is all you need", "attention mechanisms"),
+    ]
+    for s1, s2 in test_pairs:
+        pure_val = _levenshtein_ratio_pure(s1, s2)
+        actual_val = _levenshtein_ratio(s1, s2)
+        assert abs(pure_val - actual_val) < 1e-12, f"Discrepancy for {s1} vs {s2}: {pure_val} vs {actual_val}"
+
+
+def test_build_feature_batch_rejects_incompatible_schema():
+    from arxiv_pipeline.matching.contracts import ContractError, FeatureSpec
+
+    pubs = publications()
+    bundles = [
+        publication_from_rows(p["arxiv_id"], p["bibtex"], p["references"], readiness="ready")
+        for p in pubs
+    ]
+
+    # Incompatible schema with different columns
+    custom_spec = FeatureSpec(
+        name="custom_metric",
+        dtype="float64",
+        nullable=False,
+        minimum=0.0,
+        maximum=1.0,
+        missing_policy="error",
+        rationale="Custom metric rationale",
+        source_fields=["title"],
+    )
+    incompatible_schema = FeatureSchema([custom_spec])
+
+    with pytest.raises(ContractError, match="Unsupported feature schema"):
+        build_feature_batch(bundles, schema=incompatible_schema)
