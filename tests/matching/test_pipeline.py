@@ -164,6 +164,33 @@ def test_feature_schema_violation_fails_before_training(tmp_path):
     assert any(s['stage'] == 'features' and s['status'] == 'data_error' for s in result['stages'])
 
 
+@pytest.mark.parametrize('resume', [False, True])
+def test_each_publication_schema_must_match_first_accepted_schema(tmp_path, resume):
+    from arxiv_pipeline.matching.pipeline import run_matching, _schema
+    cfg, adapters = setup_run(tmp_path)
+    good = adapters['features']
+
+    def differing_schema(ctx, output):
+        payload = good(ctx, output)
+        if ctx['bundles'][0].arxiv_id != '2310.12345':
+            payload['feature_schema']['features'][0]['rationale'] = 'Different feature definition'
+            payload['features']['feature_schema_id'] = _schema(payload['feature_schema']).schema_id
+        return payload
+
+    adapters['features'] = differing_schema
+    if resume:
+        run_matching(cfg, adapters=adapters)
+    result = run_matching(dict(cfg, resume=resume), adapters=adapters)
+    assert not result['complete']
+    # Both later publications differ from the first, even though they agree with each other.
+    assert result['input_errors'].count('Publication feature schemas disagree') == 2
+    assert not any(s['stage'] in {'train', 'score', 'rank', 'evaluate', 'export'} for s in result['stages'])
+    features = [s for s in result['stages'] if s['stage'] == 'features']
+    assert len(features) == 3 and all(s['status'] == 'success' for s in features)
+    if resume:
+        assert all(s['cached'] for s in features)
+
+
 def test_label_file_mutation_during_run_prevents_complete(tmp_path):
     from arxiv_pipeline.matching.pipeline import run_matching
     cfg, adapters = setup_run(tmp_path)

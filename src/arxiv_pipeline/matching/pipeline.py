@@ -334,6 +334,7 @@ def run_matching(config, *, adapters=None):
             current = _schema(payload['feature_schema'])
             if schema is not None and schema.schema_id != current.schema_id:
                 feature_ok = False; manifest['input_errors'].append('Publication feature schemas disagree')
+                continue
             schema = current
             feature_rows.extend(_batch(payload['features']).rows)
             dependencies.append(row['artifacts'])

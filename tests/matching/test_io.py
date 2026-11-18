@@ -110,6 +110,16 @@ def test_fixture_requires_explicit_mode(tmp_path):
     assert load_publication('2310.12345', ctx).readiness == 'invalid'
 
 
+@pytest.mark.parametrize('status', ['success', 'no_data'])
+def test_references_require_declared_artifact_even_for_no_data(tmp_path, status):
+    from arxiv_pipeline.matching.io import load_publication
+    ctx = ready_snapshot(tmp_path)
+    _checkpoint(ctx['ms1_root'], 'references', '2310.12345', {}, status=status, schema='1.0')
+    bundle = load_publication('2310.12345', ctx)
+    assert bundle.readiness == 'invalid'
+    assert any('Missing declared references artifact' in issue.message for issue in bundle.issues)
+
+
 def test_loader_hashes_bibtex_text_without_decoding_it_as_json(tmp_path):
     from arxiv_pipeline.matching.io import load_publication
     ctx = ready_snapshot(tmp_path)
