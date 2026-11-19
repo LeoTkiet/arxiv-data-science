@@ -1,27 +1,86 @@
 # Notebook chạy trên CPU
 
+## Milestone 1: phục hồi chọn lọc
+
+Mở [MS1_Selective_Recovery_CPU.ipynb](MS1_Selective_Recovery_CPU.ipynb) bằng Colab CPU.
+Notebook có ba cell chạy: kiểm kê, phục hồi, kiểm định/bàn giao. Chọn TV1–TV5 và
+nhập đường dẫn đến thư mục `data/` MS1 đang có. `AUTO` dùng đường dẫn của notebook
+MS1 cũ: `MyDrive/arxiv_ms1_data/tvN/data`. Thư mục kết quả mặc định riêng tại
+`MyDrive/arxiv_ms1_recovery/tvN`; mỗi TV chỉ dùng output của mình.
+
+Bước 2 mặc định **Chỉ kiểm kê**. Xem các hành động được in và `inventory.csv`
+trước khi đổi sang **Phục hồi local** (extract/metadata/QA) hoặc **Phục hồi có
+tải/API** (cho phép download/references/discovery cần sửa). Dừng mọi tiến trình
+ghi nguồn trước khi chạy; không mở nhiều runtime ghi cùng thư mục kết quả.
+
+Code bản vá local đã nhúng kèm SHA-256 trong notebook, không clone nhánh GitHub.
+Chép dữ liệu bằng tối đa 32 luồng về ổ Colab rồi mới hash/giải nén/xử lý. Cần chỗ
+cho một bản đầy đủ trên Colab và một bản phục hồi riêng trên Drive. Bản nền trên
+Drive chỉ được tạo khi bật phục hồi; sau đó lưu artifact/checkpoint của từng stage.
+Khi kết thúc, file đã đồng bộ và còn khớp được bỏ qua khi xuất lại dữ liệu.
+
+Sau khi mất runtime, giữ nguyên thành viên/đường dẫn và chạy lại các bước. Notebook
+chép bản phục hồi đã lưu về local và kiểm tra lại tính toàn vẹn; stage tốt không
+gọi API lại. Việc chép dữ liệu khi Colab mất ổ local vẫn cần thời gian. Stage bị
+ngắt ngay lúc ghi hoặc đồng bộ có thể phải chạy lại.
+
+Bước 3 cập nhật `data/manifests`, QA, summary và snapshot receipt, xuất ZIP bằng
+chứng có audit/danh sách sửa/lỗi còn lại. **ZIP không chứa raw/corpus**; bàn giao
+cả link `data/` và ZIP. Kiểm tra `data/manifests/recovery.json`:
+`handoff_ready=true` mới được dùng làm snapshot MS2 trong phạm vi đã kiểm định.
+Nếu chưa từng phục hồi trên output này, bước 3 chỉ xuất báo cáo kiểm kê. Nếu đã
+có lượt phục hồi kết thúc được lưu trong `evidence/*/run.json`, notebook nhận lại
+lượt đó khi chạy lại bước 1, kể cả sau khi đổi runtime. Có thể chạy bước 1 rồi
+bước 3 để xuất bàn giao; không cần tải/extract lại chỉ để lấy báo cáo. ZIP giữ
+nhật ký các lượt trước trong `source-runs.json`.
+
+Đã có kết quả phục hồi TV5 trên Drive ngày 19/11/2026; còn 52 paper chưa đạt trong
+kiểm kê sau sửa. Bản vá xuất bàn giao sau khi mở lại session được kiểm thử local;
+chưa áp dụng bản vá này để ghi lại kết quả Drive. Khi sửa code, tạo lại file phân
+phối rồi chạy tests:
+
+```powershell
+python scripts/build_ms1_recovery_notebook.py
+python -m pytest tests/pipeline/test_ms1_recovery.py tests/pipeline/test_ms1_recovery_colab.py tests/test_ms1_recovery_notebook.py -q
+```
+
 ## Milestone 2: tích hợp và nghiệm thu
 
 Mở [MS2_Integration_CPU.ipynb](MS2_Integration_CPU.ipynb). Notebook dùng module
 thật của TV1–TV5, giữ MS1/MS2 ở hai root riêng, đo thời gian/RAM và thử resume.
-Mỗi người chọn `MEMBER` (tv1–tv5), nhập `MS1_INPUT` là data MS1 của mình và
+Mỗi người chọn `MEMBER` (tv1–tv5), nhập `MS1_INPUT` là data MS1 sau phục hồi và
 chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại cell lựa chọn,
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Notebook dùng mã production `40103bacb5c34a85baecaa16fc78a856044961e8`.
-Mỗi lô mặc định có 25 ID. Tối đa 32 luồng chép source/checkpoint cần thiết về
+Notebook pin `CODE_REF=3ae67d5553eef652d92e5386eef4248b9d124779`, commit đã merge
+bản sửa MS1/MS2 qua PR #28. Để trống `MS1_INPUT` dùng
+`/content/drive/MyDrive/arxiv_ms1_recovery/<member>/data`. Nếu dữ liệu nằm ở
+thư mục hoặc shortcut khác, nhập đường dẫn mount thực tế đến `data/`, không dùng
+URL Drive hoặc ZIP bằng chứng. Dữ liệu MS1 cần ổn định trước khi chạy.
+Mỗi lô mặc định có 50 ID, dùng 8 luồng chép source/checkpoint cần thiết về
 `/content/arxiv_ms2_local`; parser và QA đọc/ghi trên ổ local. Snapshot MS1 cần
 được giữ cố định suốt lượt chạy. Source của lô được dọn sau khi lưu checkpoint,
 output local tích lũy để tạo ZIP cuối. Cần đủ dung lượng cho source một lô,
 output của lượt chạy và ZIP xuất cuối.
 
-Để chuyển một lượt FULL đang chạy sang bản này, dừng cell parsing cũ và đợi
-cell dừng hẳn. Mở notebook mới trong runtime sạch, giữ nguyên `MEMBER`,
-`MS1_INPUT`, `RUN_MODE='FULL'` và đường dẫn output đã dùng. Các checkpoint
-PR #20 hợp lệ được dùng lại sau kiểm tra hash. Cell parsing in giai đoạn chép
-dữ liệu, số ID đã lưu trên Drive, giây/ID trong lô và số stage dùng cache.
-Lượt tiếp theo có thể tiếp tục từ cả file checkpoint cũ lẫn gói checkpoint mới.
+Khi chuyển sang bản sửa, dừng cell cũ và đợi dừng hẳn rồi mở notebook mới trong
+runtime sạch. Bản này dùng `RUN_TAG='ms2-repaired-20261119'`, ghi output riêng;
+giữ kết quả cũ để đối chiếu. Parser đã thay đổi nên không ép completion index
+hoặc receipt của runtime cũ thành tương thích. Lượt đầu của runtime mới cần
+tính lại các stage liên quan; không cần tải lại MS1 nếu raw/data đã phục hồi tốt.
+
+Chạy mới tự tạo `completion-index.json`. Các lần resume sau giữ nguyên tag mới,
+thành viên, input và snapshot: bài đã qua validation được bỏ qua mà không chép
+lại source. Notebook ưu tiên ID mới rồi thử lại bài có receipt chưa hoàn tất.
+Cell parsing in số ID đã lưu, giây/ID và số stage dùng cache. Index/receipt khác
+context làm notebook dừng trước khi sửa output; không đổi về tag cũ để bỏ qua
+kiểm tra này. Snapshot thay đổi thì dùng một tag riêng khác.
+
+Pilot local trên dữ liệu TV5 sau phục hồi đạt 14/15 paper, không phải nghiệm thu
+toàn bộ 5.000 ID. `2410.03415` v1/v2 còn `empty_include` do source chứa `\input{}`;
+giữ lỗi để review, không coi là no_source hay hoàn tất. Chạy SMOKE trước, rồi
+mới FULL theo dải được giao. Bản này chưa được benchmark đầy đủ trên Colab.
 
 `acceptance.json` ghi bài/version thành công, `no_source`, lỗi, thiếu đầu vào và
 cảnh báo. Output tách theo `<OUTPUT_ROOT>/<RUN_TAG>/<smoke|full>/<MEMBER>/`;
@@ -39,7 +98,8 @@ này để bàn giao kết quả mới; các thư mục rời từ lượt cũ m
 `delivery.json` có trạng thái published và SHA-256 của ZIP đã xuất.
 
 Thời gian benchmark gồm đọc discovery, chép input, khôi phục checkpoint,
-parsing/QA local và lưu gói theo lô. Thời gian đóng gói/upload ZIP cuối ghi riêng
+parsing/QA local, lưu gói theo lô và thu thập output cũ. RAM đo trong bước
+discovery và xử lý bài còn lại. Thời gian đóng gói/upload ZIP cuối ghi riêng
 trong delivery. Số stage dùng cache được ghi trong acceptance. SMOKE kiểm tra
 resume thêm trên local; FULL có thể bật `VERIFY_RESUME` nếu cần.
 Notebook này chưa được thực thi trên Colab trong lần nghiệm thu local.

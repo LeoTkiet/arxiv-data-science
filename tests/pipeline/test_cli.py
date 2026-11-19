@@ -5,6 +5,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from io import StringIO
 import json
+import hashlib
+from arxiv_pipeline.common.utils import atomic_json
 import tempfile
 from unittest import TestCase
 from unittest.mock import patch
@@ -125,6 +127,11 @@ class IntegrationTests(TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("test artifact", encoding="utf-8")
                 artifacts[key] = "../escape" if escape else relative
+                if stage == 'download' and not escape:
+                    sidecar = relative + '.metadata.json'
+                    atomic_json(output / sidecar, dict(status='success', raw_size_bytes=path.stat().st_size,
+                                sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+                    artifacts['download_metadata'] = sidecar
             return StageResult(stage, record["arxiv_id"], number, status, utc_now(), artifacts=artifacts)
         return execute
 
@@ -144,7 +151,7 @@ class IntegrationTests(TestCase):
             self.assertEqual(self.calls, [])
             (self.output / "corpus/2301.00001/v1/main.tex").unlink()
             run(["2301.00001"], self.output, client=client, full=True, resume=True)
-            self.assertEqual(self.calls, ["extract"])
+            self.assertEqual(self.calls, ["extract", "validate"])
 
     def test_pdf_only_preserved_and_extraction_skipped(self):
         client, _ = fixture_client()

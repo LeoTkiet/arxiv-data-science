@@ -11,6 +11,7 @@ Complies with docs/CONTRACTS.md and the project specification:
 """
 
 import gzip
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -34,6 +35,14 @@ class ExtractionSecurityError(ValueError):
 class ExtractionDataError(ValueError):
     """Raised when archive payload is corrupted, invalid or unreadable."""
     pass
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def is_safe_path(base_dir: Path, target_path: Path) -> bool:
@@ -173,7 +182,7 @@ def extract_source(source_path: Path, corpus_dir: Path) -> tuple[str, list[Path]
         (status, kept_files, metadata_dict)
     """
     if not source_path.exists() or source_path.stat().st_size == 0:
-        return "no_source", [], {"reason": "source file does not exist or is empty"}
+        raise ExtractionDataError('Source file does not exist or is empty; no PDF-only evidence')
 
     # Peek format from header
     with open(source_path, "rb") as f:
@@ -278,8 +287,15 @@ def run(record: dict[str, Any], output_dir: Path, *, version: dict[str, Any] | N
     source_path = output_dir / source_rel
 
     try:
+        source_hash = _sha256(source_path) if source_path.is_file() else None
         status, kept_files, meta = extract_source(source_path, corpus_dir)
+        if _sha256(source_path) != source_hash:
+            raise ExtractionDataError('Source changed during extraction; retry on a frozen snapshot')
         if status == "success":
+            meta['source_sha256'] = source_hash
+            meta['corpus_sha256'] = {
+                path.relative_to(corpus_dir).as_posix(): _sha256(path) for path in kept_files
+            }
             # Save sidecar metadata
             meta_path = corpus_dir / "extract_metadata.json"
             atomic_json(meta_path, meta)

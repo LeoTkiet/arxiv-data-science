@@ -175,7 +175,9 @@ def test_resume_skips_download(tmp_path: Path, downloader: ArxivDownloader):
     meta = tmp_path / "raw/2301.00006/v1/download_metadata.json"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"existing_source")
-    meta.write_text(json.dumps({"status": "success", "raw_size_bytes": 15}), encoding="utf-8")
+    meta.write_text(json.dumps({"status": "success", "raw_size_bytes": 15,
+        "arxiv_id": "2301.00006", "version": 1,
+        "sha256": hashlib.sha256(target.read_bytes()).hexdigest()}), encoding="utf-8")
 
     with patch.object(downloader.session, "get") as mock_get:
         res = downloader.download_version("2301.00006", 1, target, meta)

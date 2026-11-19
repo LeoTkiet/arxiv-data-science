@@ -104,6 +104,10 @@ class S2Source:
             chunk = arxiv_ids[start:start + config.S2_BATCH_SIZE]
             t0 = time.time()
             results = self._batch_split(chunk)
+            if not isinstance(results, list) or len(results) != len(chunk):
+                for aid in chunk:
+                    yield Outcome(aid, 'error', error='S2 batch response count does not match requested IDs')
+                continue
             t_batch = (time.time() - t0) / len(chunk)    # batch time shared evenly per paper
             for aid, data in zip(chunk, results):
                 t1 = time.time()

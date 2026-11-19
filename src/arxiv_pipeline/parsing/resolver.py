@@ -1,14 +1,16 @@
 """Static TeX compilation-path resolver (MS2/TV1).
 
-No TeX engine or shell is executed. Dynamic filenames, conditional compilation,
-missing includes and malformed document/bibliography boundaries fail explicitly.
+No TeX engine or shell is executed. Proven static branches can be selected;
+unresolved conditions, dynamic filenames and malformed boundaries fail explicitly.
 See docs/MS2_RESOLVER.md for the supported syntax and handoff example.
 """
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path, PureWindowsPath
 import re
+import tarfile
 
 from arxiv_pipeline.common.schemas import ErrorInfo, PARSING_SCHEMA_VERSION, StageResult
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
@@ -41,6 +43,7 @@ class _Piece:
     text: str
     path: str
     start: int
+    archive_member: str | None = None
 
 
 @dataclass
@@ -194,20 +197,127 @@ def _macro_end(text, match):
     return pos
 
 
-def _tokens(text, depth=0):
+def _conditional_bounds(text, opening):
+    """Find branch boundaries without parsing malformed inactive macro bodies."""
+    level, alternative, pos = 1, None, opening.end()
+    while match := _COMMAND.search(text, pos):
+        name, pos = match.group(1), match.end()
+        literal = _literal_end(text, match)
+        if literal is not None:
+            pos = literal
+            continue
+        if name in _MACROS:
+            try: pos = _macro_end(text, match)
+            except ResolveError: pass  # TeX skips inactive tokens, not their argument syntax.
+            continue
+        if name == 'newif':
+            declaration = _COMMAND.match(text, _space(text, pos))
+            if declaration: pos = declaration.end()
+        elif name.startswith('if'):
+            level += 1
+        elif name == 'fi':
+            level -= 1
+            if level == 0: return alternative, match
+        elif name == 'else' and level == 1:
+            if alternative is not None:
+                raise ResolveError('malformed_conditional', 'Multiple else branches')
+            alternative = match
+    raise ResolveError('malformed_conditional', f'Unclosed conditional {opening.group(1)}')
+
+
+def _tokens(text, depth=0, *, booleans=None, unused_conditional=None):
     """Lex commands without interpreting commands in literals or macro definitions."""
     if depth > MAX_INCLUDE_DEPTH:
         raise ResolveError('syntax_depth', 'Nested command argument depth limit exceeded')
-    pos = 0
+    pos, group_depth = 0, 0
     while match := _COMMAND.search(text, pos):
         name, start, end = match.group(1), match.start(), match.end()
+        if booleans is not None:
+            gap = re.sub(r'\\.', '', text[pos:start], flags=re.S)
+            group_depth += gap.count('{') - gap.count('}')
         literal_end = _literal_end(text, match)
         if literal_end is not None:
             pos = literal_end
             continue
         if name in _MACROS:
             pos = _macro_end(text, match)
+            if booleans is not None:
+                defined = re.match(r'\\\w+\*?\s*(?:\{\s*)?\\([A-Za-z@]+)', text[start:pos])
+                if defined:
+                    target = defined.group(1)
+                    if target in booleans or target in {'iftrue','iffalse'}:
+                        raise ResolveError('unsupported_conditional', 'Redefined boolean command requires a TeX engine')
+                    for ending in ('true','false'):
+                        if target.endswith(ending) and 'if'+target[:-len(ending)] in booleans:
+                            raise ResolveError('unsupported_conditional', 'Redefined boolean setter requires a TeX engine')
             yield _Token('definition', start, pos, text[start:pos])
+            continue
+        if booleans is not None:
+            if name == 'let' and booleans:
+                raise ResolveError('unsupported_conditional', 'Boolean aliases require a TeX engine')
+            if name == 'begingroup': group_depth += 1
+            elif name == 'endgroup': group_depth -= 1
+            if name == 'newif':
+                declaration = _COMMAND.match(text, _space(text, end))
+                if declaration is None or not declaration.group(1).startswith('if'):
+                    raise ResolveError('malformed_conditional', 'newif requires a conditional command')
+                if group_depth or depth:
+                    raise ResolveError('unsupported_conditional', 'Grouped boolean declarations require a TeX engine')
+                flag, pos = declaration.group(1), declaration.end()
+                booleans[flag] = False
+                yield _Token('conditional_control', start, pos, f'Declared {flag}=false')
+                continue
+            assignment = next(((name[:-len(ending)], value) for ending,value in
+                (('true',True),('false',False)) if name.endswith(ending)
+                and 'if'+name[:-len(ending)] in booleans), None)
+            if assignment:
+                if group_depth or depth:
+                    raise ResolveError('unsupported_conditional', 'Grouped boolean assignments require a TeX engine')
+                booleans['if'+assignment[0]] = assignment[1]
+                pos = end
+                yield _Token('conditional_control', start, pos, f'Assigned if{assignment[0]}={assignment[1]}')
+                continue
+            if name.startswith('if') and name != 'ifCLASSOPTIONcaptionsoff':
+                alternative, closing = _conditional_bounds(text, match)
+                choice = {'iftrue':True,'iffalse':False}.get(name, booleans.get(name))
+                if choice is None:
+                    branches = [text[end:alternative.start() if alternative else closing.start()]]
+                    if alternative: branches.append(text[alternative.end():closing.start()])
+                    if unused_conditional and unused_conditional(text, start, closing.end(), branches):
+                        pos = closing.end()
+                        yield _Token('conditional_control', start, pos, f'Omitted unused macro definitions in {name}; branch not assumed')
+                        continue
+                    raise ResolveError('unsupported_conditional', f'Cannot determine active branch of {name}')
+                lo = end if choice else (alternative.end() if alternative else closing.start())
+                hi = (alternative.start() if alternative else closing.start()) if choice else closing.start()
+                yield _Token('conditional_control', start, lo, f'Selected {name}={choice}')
+                for nested in _tokens(text[lo:hi], depth+1, booleans=booleans, unused_conditional=unused_conditional):
+                    yield _Token(nested.name, nested.start+lo, nested.end+lo, nested.value)
+                pos = closing.end()
+                yield _Token('conditional_control', hi, pos)
+                continue
+        if name == 'titlespacing':
+            pos = end + (end < len(text) and text[end] == '*')
+            pos = _space(text, pos)
+            if pos < len(text) and text[pos] == '{':
+                heading, pos = _group(text, pos)
+            else:
+                heading_match = _COMMAND.match(text, pos)
+                if heading_match is None:
+                    raise ResolveError('malformed_tex', 'titlespacing requires a command reference')
+                heading, pos = heading_match.group(), heading_match.end()
+            if not re.fullmatch(r'\\[A-Za-z@]+', heading.strip()):
+                raise ResolveError('unsupported_tex', 'titlespacing requires a single command reference')
+            arguments = []
+            for _ in range(3):
+                value, pos = _group(text, pos)
+                arguments.append(value)
+            pos = _space(text, pos)
+            if pos < len(text) and text[pos] == '[':
+                value, pos = _group(text, pos, '[', ']')
+                arguments.append(value)
+            # Its first argument names a heading command; it does not execute it.
+            yield _Token('format_config', start, pos, ' '.join(arguments))
             continue
         value = ''
         if name in {'begin', 'end', 'documentclass', 'bibliography', 'bibliographystyle',
@@ -228,7 +338,8 @@ def _tokens(text, depth=0):
         yield _Token(name, start, end, value)
         if name in _HEADINGS:
             # Headings can execute input/include inside their title arguments.
-            for nested in _tokens(text[arg_start + 1:end - 1], depth + 1):
+            for nested in _tokens(text[arg_start + 1:end - 1], depth + 1,
+                                  booleans=booleans, unused_conditional=unused_conditional):
                 yield _Token(nested.name, nested.start + arg_start + 1,
                              nested.end + arg_start + 1, nested.value)
         pos = end
@@ -241,7 +352,7 @@ def _slice(pieces, start, end):
         lo, hi = max(start, offset), min(end, stop)
         if lo < hi:
             result.append(_Piece(piece.text[lo - offset:hi - offset], piece.path,
-                                 piece.start + lo - offset))
+                                 piece.start + lo - offset, piece.archive_member))
         offset = stop
         if offset >= end:
             break
@@ -286,11 +397,15 @@ def _json(path):
 
 
 class _Resolver:
-    def __init__(self, input_root, corpus, paper_id):
+    def __init__(self, input_root, corpus, paper_id, *, raw_source=None):
         self.input_root, self.corpus, self.paper_id = input_root, corpus, paper_id
+        self.raw_source, self.archive_index = raw_source, None
+        self.archive_paths, self.archive_sources = {}, {}
+        self.archive_hash = None
         self.cache, self.warnings, self.visited, self.included = {}, [], set(), []
         self.includeonly, self.finished = None, False
         self.macros, self.environments = {}, {}
+        self.booleans = {}
         self.expanded_chars = self.source_bytes = 0
         self.tex_files, self.bib_files = [], []
         if not corpus.is_dir():
@@ -311,9 +426,15 @@ class _Resolver:
 
     def read(self, path):
         if path not in self.cache:
-            if path.stat().st_size + self.source_bytes > MAX_SOURCE_BYTES:
+            member = self.archive_paths.get(path)
+            if member is not None:
+                data = self.archive_read(member)
+            else:
+                if path.stat().st_size + self.source_bytes > MAX_SOURCE_BYTES:
+                    raise ResolveError('source_limit', 'Source byte limit exceeded')
+                data = path.read_bytes()
+            if len(data) + self.source_bytes > MAX_SOURCE_BYTES:
                 raise ResolveError('source_limit', 'Source byte limit exceeded')
-            data = path.read_bytes()
             self.source_bytes += len(data)
             try:
                 text = data.decode('utf-8')
@@ -321,22 +442,93 @@ class _Resolver:
                 text = data.decode('latin-1')
                 self.warn('encoding_fallback', 'Decoded non-UTF8 source as Latin-1', path)
             self.cache[path] = _comment_pieces(text, self.relative(path))
+            if member is not None:
+                for piece in self.cache[path]: piece.archive_member = self.archive_sources[member]['member']
         return self.cache[path]
+
+    def archive_members(self):
+        """Inspect this version's raw archive; never extract or follow links."""
+        if self.archive_index is None:
+            if self.raw_source is None or not tarfile.is_tarfile(self.raw_source):
+                self.archive_index = {}
+                return self.archive_index
+            members = {}
+            try:
+                with tarfile.open(self.raw_source, 'r:*') as archive:
+                    for index, member in enumerate(archive):
+                        if index >= 10000:
+                            raise ResolveError('source_limit', 'Raw archive member limit exceeded')
+                        name = member.name
+                        while name.startswith('./'): name = name[2:]
+                        if not name or member.isdir(): continue
+                        # Validate even unused member names; no path is materialized.
+                        name = _relative(self.corpus, name).relative_to(self.corpus).as_posix()
+                        if name in members:
+                            raise ResolveError('ambiguous_archive', f'Duplicate raw archive member: {name}')
+                        members[name] = member
+            except tarfile.TarError as exc:
+                raise ResolveError('invalid_archive', str(exc)) from exc
+            # Publish only a fully validated index. Root ranking may catch an
+            # error to inspect other candidates; it must never reuse a partial index.
+            self.archive_index = members
+        return self.archive_index
+
+    def archive_read(self, name):
+        member = self.archive_members().get(name)
+        if member is None: return None
+        if not member.isfile():
+            raise ResolveError('unsafe_path', 'Raw dependency is not a regular file')
+        if member.size + self.source_bytes > MAX_SOURCE_BYTES:
+            raise ResolveError('source_limit', 'Raw dependency byte limit exceeded')
+        try:
+            with tarfile.open(self.raw_source, 'r:*') as archive:
+                stream = archive.extractfile(member)
+                if stream is None: raise ResolveError('invalid_archive', 'Unreadable raw dependency')
+                with stream: data = stream.read(member.size + 1)
+        except tarfile.TarError as exc:
+            raise ResolveError('invalid_archive', str(exc)) from exc
+        if len(data) != member.size or any(c < 32 and c not in {9,10,12,13} for c in data):
+            raise ResolveError('invalid_archive_source', 'Raw dependency is binary or truncated')
+        if self.archive_hash is None:
+            digest = hashlib.sha256()
+            with self.raw_source.open('rb') as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b''): digest.update(chunk)
+            self.archive_hash = digest.hexdigest()
+        self.archive_sources[name] = dict(source_path=self.relative(self.raw_source),
+            source_sha256=self.archive_hash, member=member.name, member_sha256=hashlib.sha256(data).hexdigest(),
+            size_bytes=len(data))
+        return data
 
     def target(self, value, origin, suffix):
         value = value.strip()
-        if not value or any(c in value for c in '\\{}#$~') or PureWindowsPath(value).drive or value.startswith('/'):
+        if not value:
+            raise ResolveError('empty_include', 'Source contains an empty dependency filename; no target can be inferred')
+        if any(c in value for c in '\\{}#$~') or PureWindowsPath(value).drive or value.startswith('/'):
             raise ResolveError('dynamic_include', 'Filename must be a static relative path')
-        if not Path(value).suffix:
-            value += suffix
-        if Path(value).suffix.lower() != suffix:
+        # A dot in an extensionless TeX basename is not necessarily a suffix.
+        names = [value] if value.lower().endswith(suffix) else [value, value + suffix]
+        for directory in dict.fromkeys([origin.parent, self.corpus]):
+            found = []
+            for name in names:
+                candidate = (directory / name).resolve()
+                if not candidate.is_relative_to(self.corpus):
+                    raise ResolveError('unsafe_path', 'Include escapes version corpus')
+                if candidate.is_file():
+                    found.append(candidate)
+                elif suffix == '.tex' and not candidate.suffix:
+                    member = candidate.relative_to(self.corpus).as_posix()
+                    if member in self.archive_members():
+                        self.archive_paths[candidate] = member
+                        found.append(candidate)
+            if len(found) > 1:
+                raise ResolveError('ambiguous_include', f'Ambiguous include: {value}')
+            if found:
+                if not found[0].name.lower().endswith(suffix) and found[0] not in self.archive_paths:
+                    raise ResolveError('unsupported_include', f'Only {suffix} source paths are supported')
+                return found[0]
+        if Path(value).suffix and not value.lower().endswith(suffix) and '.' not in Path(value).stem:
+            # Preserve the explicit unsupported-extension diagnostic for missing files.
             raise ResolveError('unsupported_include', f'Only {suffix} source paths are supported')
-        candidates = [(origin.parent / value).resolve(), (self.corpus / value).resolve()]
-        for candidate in candidates:
-            if not candidate.is_relative_to(self.corpus):
-                raise ResolveError('unsafe_path', 'Include escapes version corpus')
-            if candidate.is_file():
-                return candidate
         return None
 
     def dynamic_macro(self, name, seen=None):
@@ -346,20 +538,43 @@ class _Resolver:
         seen.add(name)
         definition = self.macros[name]
         return bool(_COMPILATION_COMMAND.search(definition)) or any(
+            any(m.group(1).endswith(ending) and
+            'if'+m.group(1)[:-len(ending)] in self.booleans for ending in ('true','false')) or
             self.dynamic_macro(m.group(1), seen) for m in _COMMAND.finditer(definition))
+
+    def unused_conditional(self, text, start, end, branches):
+        """Prune only standalone, unused newcommand definitions, never prose/includes."""
+        names = set()
+        for branch in branches:
+            pos = 0
+            try: tokens = list(_tokens(branch))
+            except ResolveError: return False
+            for token in tokens:
+                if branch[pos:token.start].strip() or token.name != 'definition': return False
+                macro = re.match(r'\\newcommand\*?\s*(?:\{\s*)?\\([A-Za-z@]+)', token.value)
+                if macro is None: return False
+                names.add(macro.group(1)); pos = token.end
+            if branch[pos:].strip(): return False
+        if not names: return False
+        remaining = '\n'.join(_text(self.read(p)) for p in self.tex_files).replace(text[start:end], '')
+        # Includes or generated command names prevent a proof that these names are unused.
+        if re.search(r'\\(?:input|include|csname|let)\b', remaining): return False
+        return not any(re.search(r'\\'+re.escape(name)+r'(?![A-Za-z@])', remaining) for name in names)
 
     def find_root(self):
         candidates = []
+        rejected = []
         preferred = ['main', 'paper', 'ms', self.paper_id.replace('/', '_')]
         for path in self.tex_files:
             # An unrelated damaged draft must not prevent using a valid publication root.
             try:
                 tokens = []
-                for token in _tokens(_text(self.read(path))):
+                for token in _tokens(_text(self.read(path)), booleans={}, unused_conditional=self.unused_conditional):
                     tokens.append(token)
                     if token.name == 'endinput' or (token.name == 'end' and token.value == 'document'):
                         break
-            except ResolveError:
+            except ResolveError as exc:
+                rejected.append(f'{self.relative(path)}: {exc.code}: {exc}')
                 continue
             if any(t.name == 'documentclass' for t in tokens):
                 count = 0
@@ -370,13 +585,16 @@ class _Resolver:
                         except ResolveError:
                             pass
                 rank = preferred.index(path.stem.lower()) if path.stem.lower() in preferred else len(preferred)
-                candidates.append((rank, -count, self.relative(path), path))
+                malformed_document = (sum(t.name == 'documentclass' for t in tokens) > 1 or
+                    sum(t.name == 'begin' and t.value == 'document' for t in tokens) > 1)
+                candidates.append((malformed_document, rank, -count, self.relative(path), path))
         if not candidates:
-            raise ResolveError('missing_root', 'No usable documentclass root found')
+            detail = '; rejected candidates: ' + '; '.join(rejected[:3]) if rejected else ''
+            raise ResolveError('missing_root', 'No usable documentclass root found' + detail)
         candidates.sort()
         chosen = candidates[0][-1]
         if len(candidates) > 1:
-            self.warn('ambiguous_root', 'Root selected by filename priority, valid include count, then path', chosen)
+            self.warn('ambiguous_root', 'Root selected by document viability, filename priority, valid include count, then path', chosen)
         return chosen
 
     def _emit(self, pieces):
@@ -396,7 +614,28 @@ class _Resolver:
                 self.included.append(self.relative(path))
         pieces, result, pos = self.read(path), [], 0
         text = _text(pieces)
-        for token in _tokens(text):
+        for token in _tokens(text, booleans=self.booleans, unused_conditional=self.unused_conditional):
+            if token.start < pos:
+                continue
+            if token.name == 'conditional_control':
+                result.extend(self._emit(_slice(pieces, pos, token.start)))
+                pos = token.end
+                if token.value: self.warn('static_conditional', token.value, path)
+                continue
+            if token.name == 'format_config' and (
+                    _COMPILATION_COMMAND.search(token.value) or any(
+                        self.dynamic_macro(m.group(1)) or m.group(1).startswith('if')
+                        for m in _COMMAND.finditer(token.value))):
+                raise ResolveError('unsupported_tex', 'Formatting configuration contains dynamic compilation commands')
+            # Both outcomes of this observed class switch affect page layout
+            # only. Never generalize this rule to unknown conditional content.
+            if token.name == 'ifCLASSOPTIONcaptionsoff':
+                layout = re.match(r'\\ifCLASSOPTIONcaptionsoff\b(?:\s|\\(?:newpage|clearpage|relax)\b)*\\fi\b', text[token.start:])
+                if layout:
+                    result.extend(self._emit(_slice(pieces, pos, token.start)))
+                    pos = token.start + layout.end()
+                    self.warn('layout_conditional_omitted', 'Omitted layout-only class conditional', path)
+                    continue
             if token.name == 'definition':
                 macro = re.match(r'\\[A-Za-z@]+\*?\s*(?:\{\s*)?\\([A-Za-z@]+)', token.value)
                 if macro:
@@ -484,7 +723,7 @@ class _Resolver:
                     index += 1
                 continue
             index += 1
-        referenced = []
+        referenced, unresolved = [], []
         # Bibliography declarations can occur in either the preamble or body.
         for pieces in (preamble, body):
             chunk = _text(pieces)
@@ -493,14 +732,54 @@ class _Resolver:
                     source = _slice(pieces, token.start, token.start + 1)[0].path
                     origin = self.input_root / source
                     for name in token.value.split(','):
-                        target = self.target(name, origin, '.bib')
+                        try:
+                            target = self.target(name, origin, '.bib')
+                        except ResolveError as exc:
+                            if exc.code != 'unsafe_path': raise
+                            unresolved.append((name, origin, exc))
+                            continue
                         if target is None:
-                            self.warn('missing_bibliography', f'Referenced BibTeX file not found: {name}', origin)
+                            unresolved.append((name, origin, None))
                         elif self.relative(target) not in referenced:
                             referenced.append(self.relative(target))
+        if unresolved and not referenced and not items:
+            fallback = self.archive_bibliography(_text(preamble), text)
+            if fallback:
+                items.extend(fallback)
+                self.warn('archive_bibliography_fallback',
+                          'Used same-jobname BBL from this version raw archive; all static cited keys are present',
+                          self.raw_source)
+                unresolved = []
+        for name, origin, error in unresolved:
+            if error is not None: raise error
+            self.warn('missing_bibliography', f'Referenced BibTeX file not found: {name}', origin)
         ranges.extend((t.start, t.end) for t in tokens if t.name in
                       {'bibliography', 'bibliographystyle', 'addbibresource', 'printbibliography'})
         return _without(body, ranges), items, referenced
+
+    def archive_bibliography(self, preamble, body, *, require_complete=True):
+        from arxiv_pipeline.parsing.bibliography import _cited_keys
+        selected = _cited_keys(dict(preamble_tex=preamble, merged_body_tex=body))
+        if not selected: return None
+        name = self.main_path.relative_to(self.corpus).with_suffix('.bbl').as_posix()
+        data = self.archive_read(name)
+        if data is None: return None
+        try:
+            decoded = data.decode('utf-8')
+        except UnicodeDecodeError:
+            decoded = data.decode('latin-1')
+            self.warn('encoding_fallback', f'Decoded archive member {name} as Latin-1', self.raw_source)
+        text = _text(_comment_pieces(decoded, name))
+        tokens = list(_tokens(text))
+        if any(t.name in {'input','include','bibliography','addbibresource','documentclass'} for t in tokens):
+            return None
+        begins = [t for t in tokens if t.name == 'begin' and t.value == 'thebibliography']
+        ends = [t for t in tokens if t.name == 'end' and t.value == 'thebibliography']
+        if len(begins) != 1 or len(ends) != 1 or begins[0].end > ends[0].start: return None
+        items = [t for t in tokens if t.name == 'bibitem' and begins[0].end <= t.start < ends[0].start]
+        if require_complete and not selected.issubset({t.value.strip() for t in items}): return None
+        return [text[t.start:(items[i+1].start if i+1 < len(items) else ends[0].start)].strip()
+                for i,t in enumerate(items)]
 
     def gather(self, payload):
         payload['bib_file_paths'] = [self.relative(p) for p in self.bib_files]
@@ -510,6 +789,7 @@ class _Resolver:
             self.warn('no_tex_source', 'Corpus inventory contains only BibTeX files')
             return 'no_source'
         root = self.find_root()
+        self.main_path = root
         merged = self.expand(root)
         text = _text(merged)
         tokens = list(_tokens(text))
@@ -519,16 +799,23 @@ class _Resolver:
             raise ResolveError('document_boundary', 'Expected one begin/end document pair on compilation path')
         preamble = _slice(merged, 0, begins[0].start)
         body, items, referenced = self.references(preamble, _slice(merged, begins[0].end, ends[0].start))
+        if referenced:
+            supplemental = self.archive_bibliography(_text(preamble), _text(body), require_complete=False)
+            if supplemental: payload['archive_bibitems'] = supplemental
         spans, offset = [], 0
         for piece in body:
             spans.append(dict(start=offset, end=offset + len(piece.text), source_path=piece.path,
                               source_start=piece.start, source_end=piece.start + len(piece.text)))
+            if piece.archive_member is not None:
+                spans[-1].update(source_path=self.relative(self.raw_source), archive_member=piece.archive_member)
             offset += len(piece.text)
         payload.update(is_empty_source=False, main_tex_path=self.relative(root),
                        included_files=self.included,
                        ignored_files=[self.relative(p) for p in self.tex_files if p not in self.visited],
                        preamble_tex=_text(preamble), merged_body_tex=_text(body), raw_bibitems=items,
                        referenced_bib_file_paths=referenced, source_spans=spans)
+        if self.archive_sources:
+            payload['archive_sources'] = list(self.archive_sources.values())
         return 'success'
 
 
@@ -623,7 +910,8 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
         if status == 'no_source':
             payload['warnings'].append(dict(code='no_tex_source', message=reason, source_path=None))
         else:
-            gatherer = _Resolver(source_root, corpus, paper_id)
+            gatherer = _Resolver(source_root, corpus, paper_id,
+                                 raw_source=_relative(source_root, version['source_path']))
             status = gatherer.gather(payload)
             payload['warnings'] = gatherer.warnings
         relative = f'parsed/{key}/v{number}/gathered.json'

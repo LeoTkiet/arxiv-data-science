@@ -261,8 +261,7 @@ class ResolverTests(TestCase):
 
     def test_invalid_tex_does_not_return_partial_success(self):
         cases = [r'\input{missing}', r'\input{a}', r'\input{\dynamic}',
-                 r'\begin{thebibliography}{9}\bibitem{x} No end',
-                 r'\iffalse\input{a}\fi']
+                 r'\begin{thebibliography}{9}\bibitem{x} No end']
         for body in cases:
             with self.subTest(body=body):
                 self.main(body)

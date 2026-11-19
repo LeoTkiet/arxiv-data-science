@@ -1,4 +1,5 @@
 """Offline validation of real on-disk artifacts and pipeline checkpoints."""
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -147,8 +148,12 @@ class ValidationTests(TestCase):
             path = output / version['source_path']
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('\\documentclass{article}\n% source', encoding='utf-8')
+            sidecar = str(Path(version['source_path']).with_name('download_metadata.json')).replace('\\', '/')
+            atomic_json(output/sidecar, dict(status='success', arxiv_id=record['arxiv_id'],
+                        version=version['version'], sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                        raw_size_bytes=path.stat().st_size))
             return StageResult('download', record['arxiv_id'], version['version'], 'success', utc_now(),
-                               artifacts={'source': version['source_path']})
+                               artifacts={'source': version['source_path'], 'download_metadata':sidecar})
 
         def references(record, output, **kwargs):
             return store_outcome(Outcome(record['arxiv_id'], 'ok_empty'), output)
@@ -175,7 +180,7 @@ class ValidationTests(TestCase):
         (self.output / 'corpus/2301.00001/v3').mkdir()
         self.assertEqual(self.validate()[0].status, 'data_error')
 
-    def test_resume_caches_validation_data_error(self):
+    def test_resume_refreshes_failed_validation_and_accepts_repaired_data(self):
         from arxiv_pipeline.pipeline.crawl import _run_stage
         (self.output / 'corpus/2301.00001/v3').mkdir()
         events = []
@@ -183,7 +188,11 @@ class ValidationTests(TestCase):
         self.assertEqual(res1['status'], 'data_error')
         self.assertFalse(events[-1]['cached'])
 
-        # Second resume run must hit cache even though status is data_error
+        # Failed QA must be checked again; it is not a successful completion cache.
         res2 = _run_stage('validate', self.record, self.output, None, None, True, observer=lambda e: events.append(e))
         self.assertEqual(res2['status'], 'data_error')
-        self.assertTrue(events[-1]['cached'])
+        self.assertFalse(events[-1]['cached'])
+        (self.output / 'corpus/2301.00001/v3').rmdir()
+        res3 = _run_stage('validate', self.record, self.output, None, None, True, observer=events.append)
+        self.assertEqual(res3['status'], 'success')
+        self.assertFalse(events[-1]['cached'])
