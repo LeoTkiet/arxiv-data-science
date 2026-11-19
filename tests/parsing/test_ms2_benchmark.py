@@ -149,6 +149,32 @@ def test_member_zip_contains_only_selected_member(tmp_path):
         assert not any('2310.99999' in name for name in bundle.namelist())
 
 
+def test_notebook_defaults_to_recovered_input_and_preserves_legacy_output(tmp_path):
+    repo = Path(__file__).parents[2]
+    notebook = json.loads((repo/'colab/MS2_Integration_CPU.ipynb').read_text(encoding='utf-8'))
+    cells = [''.join(c['source']) for c in notebook['cells'] if c['cell_type']=='code']
+    config = next(c for c in cells if 'CODE_REF =' in c)
+    scope = next(c for c in cells if 'MEMBER_ROWS =' in c)
+    recovered = tmp_path/'MyDrive/arxiv_ms1_recovery/tv5/data'
+    recovered.mkdir(parents=True)
+    legacy = tmp_path/'results/ms2-members-20261110/smoke/tv5'
+    legacy.mkdir(parents=True)
+    marker = legacy/'keep.txt';marker.write_text('Existing results')
+
+    def mounted_path(value):
+        prefix = '/content/drive/MyDrive/'
+        return tmp_path/'MyDrive'/str(value)[len(prefix):] if str(value).startswith(prefix) else Path(value)
+
+    context = {}
+    exec(compile(config, 'notebook-config', 'exec'), context)
+    context.update(Path=mounted_path, REPO=repo, MEMBER='tv5', MS1_INPUT='',
+                   SMOKE_IDS='2410.03025', OUTPUT_ROOT=str(tmp_path/'results'), CODE_SHA=context['CODE_REF'])
+    exec(compile(scope, 'notebook-scope', 'exec'), context)
+    assert Path(context['JOBS'][0]['input'])==recovered
+    assert context['OUTPUT_BASE']/context['MEMBER']!=legacy
+    assert marker.read_text()=='Existing results'
+
+
 def test_benchmark_uses_current_scope_and_measured_denominator(tmp_path):
     output = make_parsed_output(tmp_path)
     shutil.copytree(output / f'tables/{PAPER}', output / 'tables/2310.99999')
