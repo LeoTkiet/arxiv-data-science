@@ -41,7 +41,8 @@ Errors/skipped không khai báo artifact success; file gathered cũ nếu có kh
 ## Cú pháp và lựa chọn root
 
 - Chọn root có `\documentclass` không bị comment hoặc nằm trong literal/macro
-  definition. Ưu tiên main.tex, paper.tex, ms.tex, tên ID bài; sau đó số include
+  definition. Ưu tiên tài liệu có một document hợp lệ trước file hướng dẫn chứa
+  nhiều document mẫu; sau đó main.tex, paper.tex, ms.tex, tên ID bài, số include
   hợp lệ và thứ tự path. Nhiều ứng viên có cảnh báo `ambiguous_root`.
 - Ghép `\input{path}`, `\input path`, `\include{path}` nhiều cấp; tự thêm `.tex`
   khi thiếu suffix. Tìm từ thư mục file chứa lệnh, sau đó corpus root. Cho phép
@@ -63,6 +64,18 @@ Errors/skipped không khai báo artifact success; file gathered cũ nếu có kh
   không chạy include chỉ vì chúng nằm trong một định nghĩa chưa được gọi.
 - Nếu gọi macro/environment điều khiển include hoặc document boundaries,
   trả `dynamic_include` thay vì báo success cho body thiếu.
+- Nhận `\iftrue`, `\iffalse` và boolean khai báo bằng `\newif`/setter trực tiếp
+  ngoài nhóm; chỉ đọc nhánh đã chứng minh đang hoạt động. Không parse đối số
+  macro hỏng trong nhánh inactive. Boolean có alias, bị định nghĩa lại, setter
+  nằm trong nhóm hoặc được gọi qua macro vẫn cần TeX engine và bị từ chối.
+  Conditional chưa biết giá trị chỉ được bỏ khi cả hai nhánh chỉ khai báo
+  `\newcommand` không được dùng ở phần source còn lại, không có includes hoặc
+  tên command sinh động cản việc chứng minh. Ghi warning `static_conditional`;
+  không đoán lựa chọn package.
+- Khi dependency không có đuôi bị bộ lọc MS1 bỏ qua, đọc đúng member từ raw
+  archive cùng version. Giữ nguyên corpus; source spans có thêm `archive_member`
+  và trỏ `source_path` về raw archive. Lưu SHA-256 archive/member trong
+  `archive_sources`. Không giải nén ra đĩa hoặc đọc member là link/binary.
 
 ## References và truy vết
 
@@ -82,6 +95,11 @@ Errors/skipped không khai báo artifact success; file gathered cũ nếu có kh
   **giữ CRLF**, không phải byte offsets hoặc text sau universal newline conversion.
   Include lặp có các span riêng, kể cả khi cùng source offsets.
 - Thử decode UTF-8 trước, fallback Latin-1 có warning `encoding_fallback`.
+- `.bbl` cùng jobname với root trong raw archive có thể khôi phục bibliography
+  ngoài corpus nếu chứa đủ citation tĩnh đang dùng. Không truy cập đường dẫn
+  ngoài version. BBL đi kèm cũng có thể bổ sung đúng key thiếu trong `.bib`
+  qua `archive_bibitems`; trường hợp thiếu key, sai jobname hoặc citation động
+  không đủ điều kiện thay thế bibliography lỗi.
 
 ## Trạng thái đầu vào và giới hạn
 
@@ -97,7 +115,7 @@ Errors/skipped không khai báo artifact success; file gathered cũ nếu có kh
 - Corpus chỉ có BibTeX: no_source về body nhưng giữ bib_file_paths cho TV4.
 - Lỗi include thiếu, vòng lặp, path ra ngoài version (kể cả symlink), malformed
   bibliography: data_error, không ghi artifact success một phần.
-- TeX động (conditional compilation, catcode/csname, vòng lặp, import/subfile và
+- TeX động (conditional chưa xác định, catcode/csname, vòng lặp, import/subfile và
   dynamic filename) chưa hỗ trợ, trả data_error tường minh. Không phải bộ biên
   dịch LaTeX đầy đủ; macro văn bản được giữ nguyên để downstream xử lý.
 - Giới hạn mặc định: 64 cấp include, 64 MiB source TeX đã đọc, 64 Mi ký tự sau

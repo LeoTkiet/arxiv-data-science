@@ -176,6 +176,20 @@ merged_body_tex), `source_path` (input-relative), `source_start`, `source_end`
 (offset trong source gốc). Span dùng để truy vết, có thể bỏ trống với cảnh báo
 khi không ánh xạ được; không bịa offset sau biến đổi.
 
+Resolver có thể đọc dependency TeX không có đuôi từ raw archive của cùng version
+khi corpus không giữ file đó. Không ghi thêm file vào MS1. Với span từ archive,
+`source_path` trỏ về raw archive, thêm `archive_member`; source offsets tính trong
+chuỗi member đã decode. `included_files` vẫn dùng đường dẫn logic tương đối theo
+corpus để thể hiện include graph. `archive_sources` tùy chọn lưu `source_path`,
+`source_sha256`, `member`, `member_sha256`, `size_bytes`. Không giải nén ra đĩa,
+không theo link hoặc chấp nhận tên member trùng/escaping.
+
+`.bbl` cùng tên và thư mục với root trong raw archive có thể cung cấp bibitems.
+Thay bibliography ngoài corpus chỉ khi BBL chứa đủ citation tĩnh đang dùng;
+không đọc đường dẫn ngoài version. `archive_bibitems` tùy chọn giữ bản thô để TV4
+bổ sung đúng key còn thiếu từ `.bib`; không ghi đè trường đã lấy từ library.
+BBL có provenance archive như trên; đây là nguồn đi kèm, không phải entry giả.
+
 Empty hợp lệ có body/preamble rỗng, root null, included/ignored/raw_bibitems
 rỗng; inventory BibTeX vẫn giữ nếu có, warnings ghi lý do. Ví dụ PDF-only có
 cả hai danh sách bib rỗng. Không có no_source chỉ vì không tìm thấy root.
@@ -217,6 +231,17 @@ Không có prose_block ở output này. Empty tree có nodes=[] (không root gi�
 giữ citation_key gốc, dữ liệu thô bổ sung có thể đặt ở sidecar provenance.
 Entries không có key hoặc không parse được phải ghi cảnh báo/lỗi tường minh.
 Empty bibliography hợp lệ là entries=[]; no_source không đồng nghĩa lỗi parser.
+
+Bibliography có thể là thư viện lớn chứa nhiều entry không được paper sử dụng.
+Khi nhận diện đầy đủ các citation tĩnh, parser chỉ đọc entry được trích dẫn và
+crossref cần để kế thừa trường; ghi selection và entry bị bỏ qua trong provenance/
+warnings. Nếu có `\nocite{*}`, citation động, macro đang gọi có thể sinh citation,
+cú pháp citation chưa hỗ trợ hoặc không có citation nhận diện được, giữ full
+inventory như trước (bao gồm BibTeX-only). Không bỏ entry khi chưa chứng minh
+được citation selection; lỗi symbol trong entry đang dùng vẫn phải báo rõ.
+Entry không dùng bị thiếu dấu đóng chỉ được bỏ với diagnostic nếu các field
+đã cân bằng và scanner xác định được đầu entry tiếp theo. Entry đang dùng,
+crossref parent cần dùng hoặc field còn mở vẫn làm stage lỗi. Không sửa source.
 
 ## 6. Kết quả paper-level và occurrences
 

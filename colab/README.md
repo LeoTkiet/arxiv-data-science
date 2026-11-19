@@ -1,5 +1,49 @@
 # Notebook chạy trên CPU
 
+## Milestone 1: phục hồi chọn lọc
+
+Mở [MS1_Selective_Recovery_CPU.ipynb](MS1_Selective_Recovery_CPU.ipynb) bằng Colab CPU.
+Notebook có ba cell chạy: kiểm kê, phục hồi, kiểm định/bàn giao. Chọn TV1–TV5 và
+nhập đường dẫn đến thư mục `data/` MS1 đang có. `AUTO` dùng đường dẫn của notebook
+MS1 cũ: `MyDrive/arxiv_ms1_data/tvN/data`. Thư mục kết quả mặc định riêng tại
+`MyDrive/arxiv_ms1_recovery/tvN`; mỗi TV chỉ dùng output của mình.
+
+Bước 2 mặc định **Chỉ kiểm kê**. Xem các hành động được in và `inventory.csv`
+trước khi đổi sang **Phục hồi local** (extract/metadata/QA) hoặc **Phục hồi có
+tải/API** (cho phép download/references/discovery cần sửa). Dừng mọi tiến trình
+ghi nguồn trước khi chạy; không mở nhiều runtime ghi cùng thư mục kết quả.
+
+Code bản vá local đã nhúng kèm SHA-256 trong notebook, không clone nhánh GitHub.
+Chép dữ liệu bằng tối đa 32 luồng về ổ Colab rồi mới hash/giải nén/xử lý. Cần chỗ
+cho một bản đầy đủ trên Colab và một bản phục hồi riêng trên Drive. Bản nền trên
+Drive chỉ được tạo khi bật phục hồi; sau đó lưu artifact/checkpoint của từng stage.
+Khi kết thúc, file đã đồng bộ và còn khớp được bỏ qua khi xuất lại dữ liệu.
+
+Sau khi mất runtime, giữ nguyên thành viên/đường dẫn và chạy lại các bước. Notebook
+chép bản phục hồi đã lưu về local và kiểm tra lại tính toàn vẹn; stage tốt không
+gọi API lại. Việc chép dữ liệu khi Colab mất ổ local vẫn cần thời gian. Stage bị
+ngắt ngay lúc ghi hoặc đồng bộ có thể phải chạy lại.
+
+Bước 3 cập nhật `data/manifests`, QA, summary và snapshot receipt, xuất ZIP bằng
+chứng có audit/danh sách sửa/lỗi còn lại. **ZIP không chứa raw/corpus**; bàn giao
+cả link `data/` và ZIP. Kiểm tra `data/manifests/recovery.json`:
+`handoff_ready=true` mới được dùng làm snapshot MS2 trong phạm vi đã kiểm định.
+Nếu chưa từng phục hồi trên output này, bước 3 chỉ xuất báo cáo kiểm kê. Nếu đã
+có lượt phục hồi kết thúc được lưu trong `evidence/*/run.json`, notebook nhận lại
+lượt đó khi chạy lại bước 1, kể cả sau khi đổi runtime. Có thể chạy bước 1 rồi
+bước 3 để xuất bàn giao; không cần tải/extract lại chỉ để lấy báo cáo. ZIP giữ
+nhật ký các lượt trước trong `source-runs.json`.
+
+Đã có kết quả phục hồi TV5 trên Drive ngày 19/11/2026; còn 52 paper chưa đạt trong
+kiểm kê sau sửa. Bản vá xuất bàn giao sau khi mở lại session được kiểm thử local;
+chưa áp dụng bản vá này để ghi lại kết quả Drive. Khi sửa code, tạo lại file phân
+phối rồi chạy tests:
+
+```powershell
+python scripts/build_ms1_recovery_notebook.py
+python -m pytest tests/pipeline/test_ms1_recovery.py tests/pipeline/test_ms1_recovery_colab.py tests/test_ms1_recovery_notebook.py -q
+```
+
 ## Milestone 2: tích hợp và nghiệm thu
 
 Mở [MS2_Integration_CPU.ipynb](MS2_Integration_CPU.ipynb). Notebook dùng module

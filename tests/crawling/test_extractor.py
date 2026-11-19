@@ -229,8 +229,13 @@ class ExtractorTests(TestCase):
             src_path.parent.mkdir(parents=True, exist_ok=True)
             files = {f"paper_v{version['version']}.tex": b"\\documentclass{article}\n\\begin{document}Real Pipeline\\end{document}"}
             src_path.write_bytes(self._create_tar_gz(files))
+            import hashlib
+            from arxiv_pipeline.common.utils import atomic_json
+            sidecar = version['source_path'] + '.metadata.json'
+            atomic_json(output / sidecar, dict(status='success', raw_size_bytes=src_path.stat().st_size,
+                        sha256=hashlib.sha256(src_path.read_bytes()).hexdigest()))
             return StageResult("download", record["arxiv_id"], version["version"], "success", utc_now(),
-                               artifacts={"source": version["source_path"]})
+                               artifacts={"source": version["source_path"], 'download_metadata': sidecar})
 
         def fake_references(record, output, *, version=None, upstream=None):
             ref_file = output / f"references/{record['arxiv_id']}.json"
