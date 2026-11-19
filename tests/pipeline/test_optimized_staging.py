@@ -71,7 +71,9 @@ def test_legacy_failed_zip_negative_result_is_cached(tmp_path):
     output = make_parsed_output(tmp_path, count=1)
     job = item(tmp_path)
     identity = completion_index.context((tmp_path / 'ms1').resolve(), job)
-    completion_index.save(output, identity, {}, origin=dict(job=job, code_sha='40103bacb5c34a85baecaa16fc78a856044961e8'))
+    # The fixture was produced by today's parser; only the ZIP layout is legacy.
+    completion_index.save(output, identity, {}, origin=dict(job=job, code_sha='fixture-compatible',
+        processing_revision=identity['processing_revision']))
     archive = tmp_path / 'failed.zip'
     with zipfile.ZipFile(archive, 'w') as z:
         z.writestr(f'state/parsing/{PAPER}.json', json.dumps(dict(arxiv_id=PAPER, complete=False)))
@@ -225,7 +227,8 @@ def test_invalid_validation_cannot_be_imported_as_complete(tmp_path):
     output = make_parsed_output(tmp_path, count=1)
     item = dict(job([PAPER]), input=str(tmp_path / 'ms1'))
     (output / 'acceptance-config.json').write_text(json.dumps(dict(
-        job=item, code_sha='40103bacb5c34a85baecaa16fc78a856044961e8')))
+        job=item, code_sha='fixture-compatible',
+        processing_revision=completion_index.context((tmp_path / 'ms1').resolve(), item)['processing_revision'])))
     report = output / f'validation/parsing/{PAPER}.json'
     data = json.loads(report.read_text())
     data['valid'] = False
@@ -274,6 +277,13 @@ def test_malformed_legacy_configuration_is_not_overwritten(tmp_path):
     assert config.read_text() == 'broken{'
 
 
-def test_audited_ms3_constant_does_not_invalidate_legacy_ms2(tmp_path):
-    identity = completion_index.context(tmp_path, dict(member='tv1'))
-    assert identity['processing_revision'] == completion_index._LEGACY_REVISION
+def test_changed_parser_rejects_legacy_index_before_overwriting_output(tmp_path):
+    output = make_parsed_output(tmp_path, count=1)
+    job = item(tmp_path)
+    identity = completion_index.context((tmp_path / 'ms1').resolve(), job)
+    legacy = dict(identity, processing_revision=completion_index._LEGACY_REVISION)
+    completion_index.save(output, legacy, {})
+    before = {p.relative_to(output):p.read_bytes() for p in output.rglob('*') if p.is_file()}
+    with pytest.raises(ValueError, match='context differs'):
+        fast.run(job, output, local_root=tmp_path/'work', code_sha='new-parser')
+    assert before == {p.relative_to(output):p.read_bytes() for p in output.rglob('*') if p.is_file()}

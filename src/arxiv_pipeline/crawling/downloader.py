@@ -85,7 +85,14 @@ class ArxivDownloader:
         if not force and target_path.exists() and metadata_path.exists():
             try:
                 meta = json.loads(metadata_path.read_text(encoding="utf-8"))
-                if meta.get("status") in {"success", "no_source"}:
+                actual_hash = hashlib.sha256()
+                with target_path.open('rb') as stream:
+                    for chunk in iter(lambda: stream.read(CHUNK_SIZE), b''):
+                        actual_hash.update(chunk)
+                if (meta.get("status") == "success" and meta.get('arxiv_id') == arxiv_id
+                        and meta.get('version') == version and target_path.stat().st_size > 0
+                        and meta.get('raw_size_bytes') == target_path.stat().st_size
+                        and meta.get('sha256') == actual_hash.hexdigest()):
                     LOG.info("Resume download: %s already downloaded", versioned_id)
                     return meta
             except (OSError, ValueError):
@@ -204,6 +211,10 @@ class ArxivDownloader:
                         if total_bytes == 0:
                             raise requests.exceptions.RequestException("Empty response: 0 bytes received")
 
+                    declared_length = response.headers.get('Content-Length')
+                    if (declared_length and not response.headers.get('Content-Encoding')
+                            and int(declared_length) != total_bytes):
+                        raise requests.exceptions.RequestException('Response length does not match Content-Length')
                     os.replace(part_path, target_path)
                 finally:
                     if part_path.exists():
