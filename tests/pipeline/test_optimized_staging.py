@@ -41,6 +41,60 @@ def test_warm_resume_no_source_copy_no_legacy_tree_scan(tmp_path):
     assert result['full_assignment_accepted']
 
 
+def test_validation_hotfix_preserves_repaired_completed_index(tmp_path):
+    output = make_parsed_output(tmp_path, count=1)
+    job = item(tmp_path)
+    identity = completion_index.context((tmp_path / 'ms1').resolve(), job)
+    # Published 949e5ec processing revision, including existing completed TV5 papers.
+    assert identity['processing_revision'] == '13f1d319100f1dc14a9ed8a7d685224fa1e4994240f3db6fff0b92a86c72ef7e'
+    records, _, _ = parse._discover(tmp_path / 'ms1', [PAPER])
+    certificate = completion_index._certificate(records[0][0],
+        parse._read(output / f'state/parsing/{PAPER}.json'),
+        parse._read(output / f'tables/{PAPER}/parsing_manifest.json'),
+        parse._read(output / f'validation/parsing/{PAPER}.json'))
+    assert certificate is not None
+    completion_index.save(output, identity, {PAPER: certificate})
+    with patch.object(fast, '_stage_inputs', side_effect=AssertionError('completed paper recopied')):
+        result = fast.run(job, output, local_root=tmp_path / 'work', code_sha='local-hotfix')
+    assert result['skipped_completed_papers'] == 1
+    assert result['total_stages'] == 0
+
+
+def test_validation_hotfix_does_not_allow_unreviewed_parser_changes(tmp_path, monkeypatch):
+    original = Path.read_bytes
+    before = completion_index.context(tmp_path, item(tmp_path))
+
+    def changed(path):
+        data = original(path)
+        return data + b'\n# unreviewed parser change\n' if path.name == 'bibliography.py' else data
+
+    monkeypatch.setattr(Path, 'read_bytes', changed)
+    assert completion_index.context(tmp_path, item(tmp_path))['processing_revision'] != before['processing_revision']
+
+
+def test_partial_batch_recomputes_only_changed_validation(tmp_path):
+    implementation = parse._implementation
+
+    def old_validator(adapter, module_name):
+        return 'old-whole-file-validator' if module_name.endswith('.validation') else implementation(adapter, module_name)
+
+    with patch.object(parse, '_implementation', side_effect=old_validator):
+        output = make_parsed_output(tmp_path, count=1)
+    events = []
+    result = parse.run([PAPER], output, input_root=tmp_path / 'ms1', resume=True, frozen_input=True, observer=events.append)
+    assert result['complete']
+    assert [e['stage'] for e in events if not e['cached']] == ['validate_parse']
+    assert all(e['cached'] for e in events if e['stage'] != 'validate_parse')
+
+
+def test_parse_progress_names_current_paper_before_and_after_run(tmp_path, capsys):
+    make_parsed_output(tmp_path, count=1)
+    fast.run(item(tmp_path), tmp_path / 'fresh', local_root=tmp_path / 'work', code_sha='local-hotfix')
+    log = capsys.readouterr().out
+    assert f'parsing 1/1 | {PAPER}' in log
+    assert f'finished 1/1 | {PAPER} | success' in log
+
+
 def test_processing_only_never_publishes_handoff(tmp_path):
     output = make_parsed_output(tmp_path, count=1)
     result = fast.run(item(tmp_path), output, local_root=tmp_path / 'work',

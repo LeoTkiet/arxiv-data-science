@@ -27,6 +27,12 @@ def context(source, job):
     # All MS2 parser and validation files are identical to the historical producer.
     if revision == '3d40587055ad3971a471c5e96e12ce6391116a4e5da499838c3a89bd7855987d':
         revision = _LEGACY_REVISION
+    # Audited validation-only optimization: parse the same full BibTeX inventory
+    # in complete blocks, with identical field/count/key checks. Keep certificates
+    # from 949e5ec; unfinished validation still reruns via its producer fingerprint.
+    # This exact whole-runtime digest excludes any future/unreviewed parser edits.
+    if revision == '5943a25b3b6b83fdcb6f44d789a41f156d1ca7ba01722f097299450b494b92c5':
+        revision = '13f1d319100f1dc14a9ed8a7d685224fa1e4994240f3db6fff0b92a86c72ef7e'
     return dict(source=str(source), member=job['member'],
                 snapshot_id=job.get('snapshot_id', str(source)),
                 processing_revision=revision)

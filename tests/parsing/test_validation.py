@@ -167,6 +167,95 @@ def test_valid_dataset_passes_validation(tmp_path):
     assert doc["errors"] == []
 
 
+def test_large_bib_validation_bounds_parser_calls_and_checks_last_entry(tmp_path, monkeypatch):
+    """A full anthology export must not enter pyparsing as one giant string."""
+    from arxiv_pipeline.reporting.milestone2 import validation
+    upstream = make_valid_dataset(tmp_path)
+    path = tmp_path / upstream['stages']['deduplicate']['artifacts']['bibtex']
+    original = json.loads(path.read_text(encoding='utf-8'))[0]
+    rows = [dict(original, citation_key='vaswani2017' if i == 0 else f'key{i}',
+                 title=f'Article {i} ' + 'long title ' * 50) for i in range(180)]
+    atomic_json(path, rows)
+    manifest_path = path.with_name('parsing_manifest.json')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    manifest['counts'].update(bibtex_before=len(rows), bibtex_after=len(rows))
+    atomic_json(manifest_path, manifest)
+    bib_path = path.with_name('references.bib')
+    bib_path.write_text(render_bibtex(rows), encoding='utf-8')
+    parser = validation.parse_bib_text
+    sizes = []
+
+    def bounded(text, **kwargs):
+        sizes.append(len(text))
+        assert len(text) <= 65536, 'validation passed the whole anthology to pyparsing'
+        return parser(text, **kwargs)
+
+    monkeypatch.setattr(validation, 'parse_bib_text', bounded)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    assert result.status == 'success', result.error
+    assert len(sizes) > 1
+    # Corruption at the end must still be detected after splitting.
+    bib_path.write_text(bib_path.read_text(encoding='utf-8').replace('Article 179 ', 'WRONG 179 '), encoding='utf-8')
+    result = run(make_record(), tmp_path, upstream=upstream)
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text(encoding='utf-8'))
+    assert result.status == 'data_error'
+    assert any(e['code'] == 'bibtex_field_mismatch' and 'key179' in e['message'] for e in report['errors'])
+
+
+@pytest.mark.parametrize('suffix,code', [
+    ('@article{key0, title={Duplicate}}', 'duplicate_citation_key_in_bib_file'),
+    ('@article{broken, title={unclosed}', 'invalid_bibtex_file'),
+])
+def test_chunked_bib_validation_rejects_corrupt_tail(tmp_path, monkeypatch, suffix, code):
+    from arxiv_pipeline.reporting.milestone2 import validation
+    upstream = make_valid_dataset(tmp_path)
+    path = tmp_path / upstream['stages']['deduplicate']['artifacts']['bibtex']
+    first = json.loads(path.read_text(encoding='utf-8'))[0]
+    rows = [first] + [dict(first, citation_key=f'key{i}', title=f'Title {i}') for i in range(20)]
+    atomic_json(path, rows)
+    manifest_path = path.with_name('parsing_manifest.json')
+    manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    manifest['counts'].update(bibtex_before=len(rows), bibtex_after=len(rows))
+    atomic_json(manifest_path, manifest)
+    # Keep the duplicate test's total count equal, so the duplicate-key check runs.
+    text = render_bibtex(rows[:-1] if 'Duplicate' in suffix else rows) + suffix
+    path.with_name('references.bib').write_text(text, encoding='utf-8')
+    monkeypatch.setattr(validation, '_BIB_PARSE_CHUNK_CHARS', 512, raising=False)
+    parser = validation.parse_bib_text
+
+    def bounded(text, **kwargs):
+        assert len(text) <= 512
+        return parser(text, **kwargs)
+
+    monkeypatch.setattr(validation, 'parse_bib_text', bounded)
+    result = run(make_record(), tmp_path, upstream=upstream)
+    report = json.loads((tmp_path / result.artifacts['validation']).read_text(encoding='utf-8'))
+    assert result.status == 'data_error'
+    assert any(e['code'] == code for e in report['errors']), report['errors']
+    if 'unclosed' in suffix:
+        assert any('Unclosed BibTeX' in e['message'] for e in report['errors'])
+
+
+def test_chunked_bib_preserves_strings_redefinitions_nested_and_quoted_values(monkeypatch):
+    from arxiv_pipeline.reporting.milestone2 import validation
+    # Compare with the unchanged whole-file parser as an independent oracle.
+    text = '''@string{venue = "First"}
+@string{alias = venue # " journal"}
+@article{a, title="Quoted @ sign {and braces}", journal=alias, year=2020}
+@comment{A complete comment}
+@string{venue = "Second"}
+@preamble{"Ignored preamble"}
+@article(b, title={A {nested} title with \\{escaped\\} braces}, journal=venue, year=2021)
+@article{c, title={Child}, crossref={parent}}
+@book{parent, title={Parent}, year=2022}
+'''
+    expected, expected_warnings = validation.parse_bib_text(text)
+    monkeypatch.setattr(validation, '_BIB_PARSE_CHUNK_CHARS', 100)
+    actual, warnings = validation._parse_bib_export(text)
+    assert actual == expected
+    assert warnings == expected_warnings
+
+
 def test_repeated_element_multiple_occurrences_is_valid(tmp_path):
     """Repeated occurrences of element s1 under h1 produces duplicate (s1, h1) rows in hierarchy,
 

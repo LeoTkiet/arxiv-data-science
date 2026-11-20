@@ -24,7 +24,7 @@ from arxiv_pipeline.common.schemas import (
     StageResult,
 )
 from arxiv_pipeline.common.utils import atomic_json, paper_key, utc_now
-from arxiv_pipeline.parsing.bibliography import parse_bib_text
+from arxiv_pipeline.parsing.bibliography import _bib_blocks, parse_bib_text
 from arxiv_pipeline.parsing.deduplication import normalize_doi, normalize_title
 
 VALID_KINDS = {
@@ -38,6 +38,50 @@ VALID_KINDS = {
 }
 
 FORBIDDEN_HEADINGS = {"references", "bibliography"}
+
+_BIB_PARSE_CHUNK_CHARS = 65536
+
+
+def _parse_bib_export(text: str):
+    """Parse every entry without feeding a whole anthology into pyparsing.
+
+    Split only between complete BibTeX blocks. Keep prior string definitions in
+    their original order so aliases/redefinitions retain the parser's semantics.
+    An indivisible block (or its string context) may exceed the chunk target;
+    it is never truncated. Crossref inheritance stays disabled, as before.
+    """
+    if len(text) <= _BIB_PARSE_CHUNK_CHARS:
+        return parse_bib_text(text)
+    rows, warnings, definitions, pending_definitions = [], [], [], []
+    pieces, size, cursor = [], 0, 0
+
+    def flush():
+        nonlocal size
+        if not pieces:
+            return
+        batch_rows, batch_warnings = parse_bib_text(''.join(definitions + pieces))
+        rows.extend(batch_rows)
+        warnings.extend(batch_warnings)
+        definitions.extend(pending_definitions)
+        pending_definitions.clear()
+        pieces.clear()
+        size = 0
+
+    for kind, _, start, end in _bib_blocks(text):
+        piece = text[cursor:end]
+        if pieces and size + len(piece) > _BIB_PARSE_CHUNK_CHARS:
+            flush()
+        pieces.append(piece)
+        size += len(piece)
+        if kind == 'string':
+            pending_definitions.append(text[start:end] + '\n')
+        cursor = end
+    if text[cursor:]:
+        if pieces and size + len(text) - cursor > _BIB_PARSE_CHUNK_CHARS:
+            flush()
+        pieces.append(text[cursor:])
+    flush()
+    return rows, warnings
 
 _CITE_RE = re.compile(
     r"\\(?:cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|nocite|"
@@ -226,7 +270,7 @@ def _validate(
             issue("schema", "missing_bibtex_file", f"Declared references.bib file does not exist: {bibtex_file_rel}")
         else:
             bib_text = bib_path.read_text(encoding="utf-8")
-            parsed_bib_entries, bib_warnings = parse_bib_text(bib_text)
+            parsed_bib_entries, bib_warnings = _parse_bib_export(bib_text)
             for bw in bib_warnings:
                 code = bw.get("code")
                 if code in ("bib_entries_unparsed", "bib_entry_without_key"):
