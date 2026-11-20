@@ -53,8 +53,10 @@ chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại ce
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Notebook pin `CODE_REF=949e5ec1b625c0f15cd156084bf97b95e0c65877`, backend đã kiểm thử
-có cơ chế chuyển tiếp stage từ MS2 trước bản vá. Để trống `MS1_INPUT` dùng
+Notebook pin `CODE_REF=e8e9d1485748d0f480a3dc5aedd27c7b0efb0e7f`, backend đã kiểm thử
+có cơ chế chuyển tiếp stage từ MS2 trước bản vá và validation BibTeX theo cụm
+hoàn chỉnh, vẫn kiểm tra đủ entry/key/field. Runner in paper đang xử lý và trạng thái
+paper vừa xong. Để trống `MS1_INPUT` dùng
 `/content/drive/MyDrive/arxiv_ms1_recovery/<member>/data`. Nếu dữ liệu nằm ở
 thư mục hoặc shortcut khác, nhập đường dẫn mount thực tế đến `data/`, không dùng
 URL Drive hoặc ZIP bằng chứng. Dữ liệu MS1 cần ổn định trước khi chạy.
@@ -64,8 +66,14 @@ Mỗi lô mặc định có 50 ID, dùng 8 luồng chép source/checkpoint cần
 output local tích lũy để tạo ZIP cuối. Cần đủ dung lượng cho source một lô,
 output của lượt chạy và ZIP xuất cuối.
 
-Khi chuyển sang bản sửa, dừng cell cũ và đợi dừng hẳn rồi mở notebook mới trong
-runtime sạch. Bản này dùng `RUN_TAG='ms2-repaired-20261119'`, ghi output riêng;
+Nếu đang dùng backend `949e5ec`, dừng cell và giữ runtime để giữ checkpoint
+local. Cập nhật `CODE_REF` theo pin trên, chạy lại cell cài đặt, cell xác định phạm
+vi rồi bước parsing; giữ MEMBER, input/output, RUN_TAG và LOCAL_ROOT như cũ.
+Chứng nhận hoàn tất của runtime đó vẫn tương thích; các stage hợp lệ trong lô dở
+được dùng lại, validation tính lại theo bản sửa. Không cần chạy lại MS1.
+
+Khi chuyển từ các runtime trước bản sửa ngày 19/11, dừng hẳn writer cũ trước
+khi bắt đầu. Bản này dùng `RUN_TAG='ms2-repaired-20261119'`, ghi output riêng;
 giữ kết quả cũ để đối chiếu. Parser đã thay đổi nên không ép completion index
 hoặc receipt của runtime cũ thành tương thích. Lượt đầu của runtime mới cần
 tính lại các stage liên quan; không cần tải lại MS1 nếu raw/data đã phục hồi tốt.
