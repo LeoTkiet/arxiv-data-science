@@ -518,3 +518,32 @@ def test_legacy_metadata_with_non_object_job_is_rejected_before_writing(tmp_path
     with pytest.raises(ValueError, match="[Ll]egacy"):
         run_optimized(source, legacy, target, tmp_path / "work")
     assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("missing", ["select_smoke_ids", "validate_legacy"])
+def test_notebook_rejects_stale_runtime_before_discovery_or_output_writes(tmp_path, missing):
+    from arxiv_pipeline.pipeline import optimized_staging as fast
+
+    repo = Path(__file__).parents[2]
+    notebook = json.loads((repo / "colab/MS2_Integration_CPU.ipynb").read_text(encoding="utf-8"))
+    scope = next(
+        "".join(c["source"]) for c in notebook["cells"] if "MEMBER_ROWS =" in "".join(c["source"])
+    )
+    source = tmp_path / "data"
+    source.mkdir()
+    context = dict(
+        Path=Path,
+        REPO=repo,
+        MEMBER="tv5",
+        RUN_MODE="SMOKE",
+        MS1_INPUT=str(source),
+        OUTPUT_ROOT=str(tmp_path / "output"),
+        RUN_TAG="local-review",
+        SMOKE_IDS="2410.03026",
+        VERIFY_RESUME=False,
+        CODE_SHA="stale-pinned-runtime",
+    )
+    with patch.object(fast, missing, None):
+        with pytest.raises(RuntimeError, match="runtime"):
+            exec(compile(scope, "notebook-scope", "exec"), context)
+    assert not (tmp_path / "output").exists()
