@@ -1,6 +1,7 @@
 """Unit tests for TV2 deterministic heuristic baseline module."""
 
 from arxiv_pipeline.matching.baseline import (
+    baseline_score,
     predict_baseline_scores,
     rank_top5_predictions,
     score_pair_heuristics,
@@ -26,6 +27,10 @@ def test_predict_baseline_scores():
     batch = build_feature_batch(bundles)
     scores = predict_baseline_scores(batch)
     assert len(scores) == len(batch.rows)
+
+    # Test baseline_score alias
+    scores_alias = baseline_score(batch)
+    assert [s.score for s in scores_alias] == [s.score for s in scores]
 
     # Exact case should have higher score than unmatched case
     score_map = {(s.arxiv_id, s.ref_arxiv_id): s.score for s in scores}

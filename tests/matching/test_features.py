@@ -12,6 +12,7 @@ from arxiv_pipeline.matching.features import (
     compute_pair_feature,
     extract_pair_features,
     get_feature_schema,
+    transform_pairs,
 )
 from fixtures.matching.examples import publications
 
@@ -151,3 +152,25 @@ def test_build_feature_batch_rejects_incompatible_schema():
 
     with pytest.raises(ContractError, match="Unsupported feature schema"):
         build_feature_batch(bundles, schema=incompatible_schema)
+
+
+def test_transform_pairs_matches_build_feature_batch():
+    from arxiv_pipeline.matching.candidates import generate_candidate_pairs
+
+    pubs = publications()
+    bundles = [
+        publication_from_rows(p["arxiv_id"], p["bibtex"], p["references"], readiness="ready")
+        for p in pubs
+    ]
+    all_pairs = []
+    for b in bundles:
+        all_pairs.extend(generate_candidate_pairs(b))
+
+    batch_from_bundles = build_feature_batch(bundles)
+    batch_from_pairs = transform_pairs(all_pairs)
+
+    assert batch_from_bundles.feature_schema_id == batch_from_pairs.feature_schema_id
+    assert len(batch_from_bundles.rows) == len(batch_from_pairs.rows)
+    for r1, r2 in zip(batch_from_bundles.rows, batch_from_pairs.rows):
+        assert r1.key == r2.key
+        assert r1.values == r2.values

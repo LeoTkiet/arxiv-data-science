@@ -443,3 +443,36 @@ def build_feature_batch(
         error_msgs = [f"{i.code}: {i.message}" for i in report.errors]
         raise ContractError(f"Generated FeatureBatch failed validation: {'; '.join(error_msgs)}")
     return batch
+
+
+def transform_pairs(
+    pairs: list[tuple[BibtexInput, ReferenceInput]],
+    schema: FeatureSchema | None = None,
+) -> FeatureBatch:
+    """Transform candidate (BibTeX, Reference) pairs directly into a validated FeatureBatch."""
+    default_schema = get_feature_schema()
+    if schema is None:
+        schema = default_schema
+    elif schema.schema_id != default_schema.schema_id:
+        raise ContractError(
+            f"Unsupported feature schema: {schema.schema_id}. "
+            f"Expected registered schema {default_schema.schema_id}."
+        )
+
+    rows: list[PairFeature] = []
+    for b, r in pairs:
+        paper = b.arxiv_id
+        citing_year = None
+        if "." in paper:
+            prefix = paper.split(".")[0]
+            if len(prefix) == 4 and prefix.isdigit():
+                yy = int(prefix[:2])
+                citing_year = 2000 + yy if yy < 90 else 1900 + yy
+        rows.append(compute_pair_feature(b, r, citing_year=citing_year))
+
+    batch = FeatureBatch(rows=rows, feature_schema_id=schema.schema_id)
+    report = validate_features(batch, schema)
+    if not report.valid:
+        error_msgs = [f"{i.code}: {i.message}" for i in report.errors]
+        raise ContractError(f"Generated FeatureBatch failed validation: {'; '.join(error_msgs)}")
+    return batch

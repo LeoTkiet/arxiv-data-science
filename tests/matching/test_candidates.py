@@ -2,6 +2,7 @@
 
 import pytest
 from arxiv_pipeline.matching.candidates import (
+    build_pairs,
     generate_candidate_pairs,
     get_pair_keys,
     get_query_keys,
@@ -54,3 +55,14 @@ def test_get_keys():
     assert len(p_keys) == 2
     assert p_keys[0] == (bundle.arxiv_id, "RefA", "2001.00002")
     assert p_keys[1] == (bundle.arxiv_id, "RefA", "2001.00003")
+
+
+def test_build_pairs_signatures():
+    pubs = publications()
+    bundle = publication_from_rows(pubs[1]["arxiv_id"], pubs[1]["bibtex"], pubs[1]["references"], readiness="ready")
+    # Bundle signature
+    pairs_bundle = build_pairs(bundle)
+    assert len(pairs_bundle) == 2
+    # Lists signature
+    pairs_lists = build_pairs(bundle.bibtex, bundle.references)
+    assert pairs_lists == pairs_bundle

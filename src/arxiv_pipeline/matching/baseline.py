@@ -94,6 +94,10 @@ def predict_baseline_scores(feature_batch: FeatureBatch) -> list[ScoreRecord]:
     return scores
 
 
+# High-level alias conforming to suggested API in Notion & contract
+baseline_score = predict_baseline_scores
+
+
 def rank_top5_predictions(
     bundles: list[PublicationBundle],
     scores: list[ScoreRecord],

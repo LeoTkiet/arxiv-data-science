@@ -44,6 +44,26 @@ def generate_candidate_pairs(
     return pairs
 
 
+def build_pairs(
+    bibtex: list[BibtexInput] | PublicationBundle,
+    references: list[ReferenceInput] | None = None,
+) -> list[tuple[BibtexInput, ReferenceInput]]:
+    """Convenience adapter supporting both bundle and (bibtex, references) signatures."""
+    if isinstance(bibtex, PublicationBundle):
+        return generate_candidate_pairs(bibtex)
+    if references is None:
+        raise ContractError("references must be provided when bibtex is a list")
+    pairs: list[tuple[BibtexInput, ReferenceInput]] = []
+    for b in bibtex:
+        for r in references:
+            if b.arxiv_id != r.arxiv_id:
+                raise ContractError(
+                    f"Cross-publication pairing detected: {b.arxiv_id} != {r.arxiv_id}"
+                )
+            pairs.append((b, r))
+    return pairs
+
+
 def iterate_candidate_chunks(
     bundle: PublicationBundle,
     chunk_size: int = 1000,
