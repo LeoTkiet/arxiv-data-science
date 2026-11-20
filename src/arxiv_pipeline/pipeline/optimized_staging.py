@@ -17,7 +17,7 @@ from arxiv_pipeline.export.benchmark import (
     MemorySampler, generate_parsing_summary,
 )
 from arxiv_pipeline.main import expand_range
-from arxiv_pipeline.pipeline import parse, completion_index
+from arxiv_pipeline.pipeline import parse, completion_index, stage_migration
 from arxiv_pipeline.pipeline.parse import _file_hash as _hash
 from arxiv_pipeline.reporting.milestone2.validation import safe_path
 
@@ -221,6 +221,151 @@ def _stage_inputs(source, destination, records, workers, *, discovery_root):
     _copy_files(discovery_root, destination, discovery, set(), workers)
 
 
+def validate_legacy(source, member):
+    """Reject a parent folder or another member's output before processing starts."""
+    source = Path(source).resolve()
+    if not source.is_dir() or not any(safe_path(source, name).is_dir()
+            for name in ('parsed', 'state/stages', 'local-batches')):
+        raise ValueError('Legacy MS2 root must contain parsed/, state/stages/ or local-batches/; select the member folder')
+    for name in ('acceptance-config.json', 'acceptance.json'):
+        info = parse._read(safe_path(source, name))
+        if info is None:
+            continue
+        if not isinstance(info, dict):
+            raise ValueError('Legacy MS2 member metadata is unreadable')
+        previous_job = info.get('job') or {}
+        if not isinstance(previous_job, dict):
+            raise ValueError('Legacy MS2 job metadata must be an object')
+        owner = info.get('member') or previous_job.get('member')
+        if owner is not None and owner != member:
+            raise ValueError(f'Legacy MS2 member mismatch: expected {member}, found {owner}')
+    return source
+
+
+def select_smoke_ids(job, output, *, local_root, workers=8, limit=3):
+    """Select a smoke sample from a compact, frozen discovery copy on local disk."""
+    source, output = parse.validate_roots(job['input'], output)
+    local_root = Path(local_root).resolve()
+    for boundary in (source, output):
+        if local_root.is_relative_to(boundary) or boundary.is_relative_to(local_root):
+            raise ValueError('Local workspace must be disjoint from input and Drive output')
+    identity = completion_index.context(source, job)
+    _validate_context(output, identity, parse._read(safe_path(output, 'acceptance-config.json')))
+    assigned = set(expand_range(job['assignment_range']))
+    output.mkdir(parents=True, exist_ok=True)
+    with _persistent_workspace(local_root, output, identity, sorted(assigned)) as temporary:
+        workspace = Path(temporary)
+        discovery = workspace / 'discovery'
+        discovery.mkdir(parents=True, exist_ok=True)
+        _discovery_index(source, output, discovery, workspace, identity, workers)
+        records, errors, _ = parse._discover(discovery, None)
+        if errors:
+            raise ValueError(f'Discovery could not be read: {errors[:3]}')
+        return [record['arxiv_id'] for record, _, conflict in records
+                if not conflict and record.get('status') == 'success'
+                and record['arxiv_id'] in assigned][:limit]
+
+
+def _stage_legacy(source, destination, records, workers, *, catalog=None, versions_filter=None):
+    """Read only selected tree evidence, from loose files or checksummed batches.
+
+    Optional legacy evidence must never block normal parsing. Invalid files are
+    reported and left for the current producers to recompute.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    selected = {}
+    for record, _, conflict in records:
+        if conflict or record.get('status') != 'success':
+            continue
+        try:
+            versions = parse._versions(record)
+        except (ValueError, TypeError, KeyError):
+            continue
+        files = set()
+        key = paper_key(record['arxiv_id'])
+        for version in versions:
+            number = version['version']
+            if versions_filter is not None and (record['arxiv_id'], number) not in versions_filter:
+                continue
+            for stage in ('resolve', 'hierarchy', 'normalize'):
+                base = f'state/stages/{stage}/{key}/{number}'
+                files.update((base + '.json', base + '.dependencies.json'))
+            for name in ('gathered', 'raw_tree', 'normalized_tree'):
+                files.add(f'parsed/{key}/v{number}/{name}.json')
+        selected[record['arxiv_id']] = files
+
+    files = sorted(set().union(*selected.values()) if selected else set())
+    # Path.resolve on Windows can race with another worker creating ancestors.
+    # Validate/create the local directories before parallel file copies start.
+    for parent in sorted({Path(relative).parent.as_posix() for relative in files}):
+        safe_path(destination, parent).mkdir(parents=True, exist_ok=True)
+
+    def copy_one(relative):
+        try:
+            original = safe_path(source, relative)
+            if not original.is_file():
+                return relative, 'missing'
+            if original.stat().st_size > 128 * 1024 * 1024:
+                raise ValueError('Legacy evidence exceeds size limit')
+            before = original.stat()
+            shutil.copyfile(original, safe_path(destination, relative))
+            after = original.stat()
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ValueError('Legacy evidence changed while copying: ' + relative)
+            return relative, None
+        except (ValueError, OSError) as exc:
+            return relative, str(exc)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        failures = {p: reason for p, reason in pool.map(copy_one, files) if reason}
+    missing = {paper: files & failures.keys() for paper, files in selected.items()}
+    issues = []
+    if any(missing.values()):
+        catalog = {} if catalog is None else catalog
+        if 'journal' not in catalog:
+            try:
+                catalog['journal'] = _load_journal(source)
+            except (ValueError, TypeError, KeyError, OSError, AttributeError) as exc:
+                catalog['journal'] = {}
+                catalog['error'] = 'Legacy journal unreadable: ' + str(exc)
+        journal = catalog['journal']
+        if catalog.get('error'):
+            issues.append(dict(reason=catalog['error']))
+        packages = {}
+        for paper, files in missing.items():
+            receipt = journal.get(paper)
+            if files and receipt:
+                archive = receipt.get('archive')
+                if not isinstance(archive, str):
+                    issues.append(dict(paper_id=paper, reason='Legacy receipt has no archive path'))
+                    continue
+                packages.setdefault(archive, (receipt, set()))[1].update(selected[paper])
+        for receipt, files in packages.values():
+            try:
+                archive = _cached_archive(source, receipt, destination.parent / 'legacy-archive-cache')
+                with zipfile.ZipFile(archive) as bundle:
+                    names = Counter(info.filename for info in bundle.infolist())
+                    # Read a complete set from a receipt, rather than mix revisions.
+                    for relative in sorted(files):
+                        target = safe_path(destination, relative)
+                        target.unlink(missing_ok=True)
+                        if names[relative] != 1:
+                            failures[relative] = 'ZIP evidence missing or duplicated'
+                            continue
+                        info = bundle.getinfo(relative)
+                        if info.file_size > 128 * 1024 * 1024 or (info.external_attr >> 16) & 0o170000 == 0o120000:
+                            raise ValueError('Invalid legacy ZIP member: ' + relative)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with bundle.open(info) as src, target.open('wb') as dst:
+                            shutil.copyfileobj(src, dst)
+                        failures.pop(relative, None)
+            except (ValueError, TypeError, KeyError, OSError, zipfile.BadZipFile) as exc:
+                issues.append(dict(archive=receipt.get('archive'), reason=str(exc)))
+    # Missing evidence is expected for unfinished versions; retain counts only.
+    issues.extend(dict(path=p, reason=reason) for p, reason in failures.items() if reason != 'missing')
+    return dict(staging_issues=issues, missing_files=sum(reason == 'missing' for reason in failures.values()))
+
+
 def load_completed(output, identity, records, journal, previous_config, workspace, workers):
     """Do not reopen known failed contextual ZIPs or reimport the entire legacy tree."""
     saved = parse._read(safe_path(output, 'completion-index.json'))
@@ -383,6 +528,7 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
     The caller must stop other writers on the selected input and output roots.
     """
     source, output = parse.validate_roots(job['input'], output)
+    legacy = Path(job['legacy_output']).resolve() if job.get('legacy_output') else None
     previous_config = parse._read(safe_path(output, 'acceptance-config.json'))
     identity = completion_index.context(source, job)
     _validate_context(output, identity, previous_config)
@@ -390,6 +536,11 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
     for boundary in (source, output):
         if local_root.is_relative_to(boundary) or boundary.is_relative_to(local_root):
             raise ValueError('Local workspace must be disjoint from input and Drive output')
+    if legacy is not None:
+        for boundary in (source, output, local_root):
+            if legacy.is_relative_to(boundary) or boundary.is_relative_to(legacy):
+                raise ValueError('Legacy MS2 input must be disjoint from current input/output/workspace')
+        validate_legacy(legacy, job['member'])
     if type(workers) is not int or not 1 <= workers <= 32:
         raise ValueError('workers must be between 1 and 32')
     if type(batch_size) is not int or batch_size < 1:
@@ -423,7 +574,8 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
     parts, all_stages, issues = [], [], []
     resume_events = []
     resume_ok = True
-    cached_stages = total_stages = 0
+    cached_stages = total_stages = migrated_stages = 0
+    legacy_catalog = {}
     with _persistent_workspace(local_root, output, identity, identifiers) as temporary:
         workspace = Path(temporary)
         local = workspace / 'output'
@@ -455,10 +607,30 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
                         print(f'{len(skipped) + offset}/{len(records)} IDs | copying {len(batch)} pending papers with {workers} workers', flush=True)
                         _timed('input inventory + copy', _stage_inputs, source, staged, batch, workers, discovery_root=discovery_root)
                         _timed('checkpoint restore', _restore, output, local, papers, journal, workers)
+                        migration = None
+                        candidates = stage_migration.pending_versions(staged, local, batch) if legacy is not None else set()
+                        if candidates:
+                            with TemporaryDirectory(prefix='legacy-', dir=workspace) as legacy_dir:
+                                legacy_local = Path(legacy_dir)
+                                staging = _timed('legacy evidence copy', _stage_legacy,
+                                    legacy, legacy_local, batch, workers, catalog=legacy_catalog, versions_filter=candidates)
+                                migration = _timed('verify legacy stages', stage_migration.prepare_batch,
+                                    staged, local, legacy_local, batch)
+                                atomic_json(output / f'migration-reports/{uuid4().hex}.json', dict(
+                                    format=migration['format'], timestamp=utc_now(), legacy_source=str(legacy),
+                                    papers=papers, decisions=migration['decisions'], **staging))
+                                if staging['missing_files'] or staging['staging_issues']:
+                                    print(f"  legacy evidence incomplete: {staging['missing_files']} missing files, "
+                                          f"{len(staging['staging_issues'])} read issues; unproven stages will be recomputed", flush=True)
                         events = []
                         summary = _timed('parse + validation', parse.run,
                             papers, local, input_root=staged, resume=True,
                             frozen_input=True, observer=events.append)
+                        if migration is not None:
+                            events = stage_migration.merge_events(migration['events'], events)
+                            count = sum(bool(e.get('migrated')) for e in events)
+                            reasons = Counter(d['reason'] for d in migration['decisions'] if d['action'] == 'recompute')
+                            print(f'  legacy stages reused: {count} | recompute reasons: {dict(reasons)}', flush=True)
                         stages = json.loads((local / 'manifests/stages.json').read_text(encoding='utf-8'))
                         for stage in stages:
                             if stage['status'] not in parse.TERMINAL:
@@ -503,10 +675,12 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
                     all_stages.extend(stages)
                     cached_stages += sum(e['cached'] for e in events)
                     total_stages += len(events)
+                    migrated_stages += sum(bool(e.get('migrated')) for e in events)
                     merged = _merge_summary(parts, len(identifiers), input_errors)
                     atomic_json(output / 'optimized-progress.json', dict(
                         timestamp=utc_now(), processed_ids=merged['processed_ids'],
                         certified_papers=len(completed), selected_ids_count=len(identifiers),
+                        migrated_stages=migrated_stages,
                         incomplete_ids=[p['arxiv_id'] for p in merged['paper_results'] if not p['complete']],
                         elapsed_seconds=round(perf_counter() - started, 2)))
                     print(f"{merged['processed_ids']}/{len(identifiers)} IDs | saved to Drive | "
@@ -521,6 +695,7 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
             atomic_json(output / 'parsing_summary.json', merged)
             if not finalize:
                 progress = dict(status='checkpointed_not_exported', certified_papers=len(completed),
+                    migrated_stages=migrated_stages, cached_stages=cached_stages, total_stages=total_stages,
                     processed_ids=merged['processed_ids'], complete=merged['complete'],
                     full_assignment_accepted=False, incomplete_papers=[p['arxiv_id']
                         for p in merged['paper_results'] if not p['complete']])
@@ -560,6 +735,7 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
             incomplete_papers=[p['arxiv_id'] for p in merged['paper_results'] if not p['complete']],
             resume_enabled=True, resume_all_cached=resume_ok if check_resume and resume_events else None,
             cached_stages=cached_stages,
+            migrated_stages=migrated_stages,
             total_stages=total_stages, issues=issues, storage_mode='colab-local-batches',
             skipped_completed_papers=len(skipped),
             full_assignment_accepted=bool(job['ids'] is None and merged['complete'] and accounted == assigned),

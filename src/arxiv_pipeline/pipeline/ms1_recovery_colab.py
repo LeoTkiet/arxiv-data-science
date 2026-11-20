@@ -44,6 +44,13 @@ def _listing(root, progress=None):
     return result
 
 
+def _copy_directories(root, names):
+    # Windows path resolution can race with creation of a missing ancestor.
+    # Create and validate destination directories before starting copy workers.
+    for relative in sorted({Path(name).parent.as_posix() for name in names}):
+        safe_path(root, relative).mkdir(parents=True, exist_ok=True)
+
+
 def _copy(source, target):
     """Stream once, hash the copied bytes, publish only the complete file."""
     before = source.stat()
@@ -108,6 +115,7 @@ def stage_snapshot(source_root, destination_root, *, workers=32, progress=None):
         raise ValueError('Staging destination has files absent from the frozen source')
     journal['files'] = verified
     atomic_json(journal_path, journal)
+    _copy_directories(destination, pending)
     done = reused
     started = time.monotonic()
     if progress: progress(dict(kind='copy', done=done, total=len(before), reused=reused, bytes=0))
@@ -272,6 +280,7 @@ class RecoverySession:
                     names.add(scope)
         closing = {'summary.json','manifests/recovery.json','manifests/run.json'}
         ordered = sorted(names, key=lambda n: (n in closing, n.startswith('state/'), n))
+        _copy_directories(destination, ordered)
         self._emit(kind='phase', message=f'Đồng bộ {len(ordered)} file; bỏ qua nội dung đã lưu và còn khớp')
         def upload(name):
             source = safe_path(self.data, name)

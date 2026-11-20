@@ -18,6 +18,40 @@ def session_fixture(tmp_path, monkeypatch):
     return session, original
 
 
+def test_snapshot_copy_workers_receive_existing_parent_directories(tmp_path, monkeypatch):
+    from arxiv_pipeline.pipeline import ms1_recovery_colab as colab
+    source = snapshot(tmp_path, monkeypatch)
+    destination = tmp_path / 'local-data'
+    before = files(source)
+    copy = colab._copy
+
+    def copy_into_existing_parent(source, target):
+        assert target.parent.is_dir(), 'Workers must not create directory ancestors while paths are being resolved'
+        return copy(source, target)
+
+    monkeypatch.setattr(colab, '_copy', copy_into_existing_parent)
+    colab.stage_snapshot(source, destination, workers=1)
+    assert {name: digest for name, digest in files(destination).items()
+            if name != '.recovery-origin.json'} == before
+    assert files(source) == before
+
+
+def test_recovery_upload_workers_receive_existing_parent_directories(tmp_path, monkeypatch):
+    from arxiv_pipeline.pipeline import ms1_recovery_colab as colab
+    session, original = session_fixture(tmp_path, monkeypatch)
+    before = files(original)
+    copy = colab._copy
+
+    def copy_into_existing_parent(source, target):
+        if target.is_relative_to(session.persistent / 'data'):
+            assert target.parent.is_dir(), 'Upload parents must exist before workers resolve paths'
+        return copy(source, target)
+
+    monkeypatch.setattr(colab, '_copy', copy_into_existing_parent)
+    assert session.repair('local')['complete']
+    assert files(original) == before
+
+
 def test_inventory_default_does_not_publish_or_mutate_original(tmp_path, monkeypatch):
     session, original = session_fixture(tmp_path, monkeypatch)
     before = files(original)

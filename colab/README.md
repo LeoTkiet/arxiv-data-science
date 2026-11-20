@@ -77,6 +77,25 @@ Cell parsing in số ID đã lưu, giây/ID và số stage dùng cache. Index/re
 context làm notebook dừng trước khi sửa output; không đổi về tag cũ để bỏ qua
 kiểm tra này. Snapshot thay đổi thì dùng một tag riêng khác.
 
+Bản local đang bổ sung `LEGACY_MS2_INPUT` để dùng lại từng stage của MS2
+trước bản vá. Backend đọc checkpoint/dependencies/artifact từ thư mục kết quả
+thành viên hoặc `local-batches/`, xác minh hash producer và đầu vào được stage
+sử dụng. Chỉ hierarchy/normalize đủ bằng chứng được chuyển tiếp; các producer
+đã sửa và validation vẫn chạy theo bản hiện tại. Bài đã hoàn tất trên bản sửa
+tiếp tục được bỏ qua, không đọc lại MS2 cũ. Giữ tag mới khi resume.
+
+Để trống cấu hình này sẽ tìm
+`<OUTPUT_ROOT>/ms2-members-20261110/full/<MEMBER>` trước; nếu dùng shortcut,
+nhập đường dẫn mount tới thư mục thành viên. Output ghi `migration-reports/*.json`
+và `migrated_stages`; bằng chứng hash của stage dùng lại nằm trong dependencies
+của checkpoint. Thư mục MS2 cũ chỉ đọc.
+
+Phần chuyển tiếp này **chưa phát hành runtime**. `CODE_REF` vẫn là commit đã duyệt
+ở trên. Notebook local dừng trước parsing nếu có nguồn MS2 cũ nhưng runtime
+chưa hỗ trợ. Cần review, duyệt push/merge backend rồi cập nhật pin trước khi
+nhóm dùng phần này trên Colab. Lần đầu vẫn cần chép source MS1 và chạy
+resolver/bibliography hiện tại; chưa có benchmark tốc độ trên toàn corpus.
+
 Pilot local trên dữ liệu TV5 sau phục hồi đạt 14/15 paper, không phải nghiệm thu
 toàn bộ 5.000 ID. `2410.03415` v1/v2 còn `empty_include` do source chứa `\input{}`;
 giữ lỗi để review, không coi là no_source hay hoàn tất. Chạy SMOKE trước, rồi
