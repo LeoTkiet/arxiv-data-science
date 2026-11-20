@@ -623,9 +623,16 @@ def run(job, output, *, local_root, code_sha, workers=8, batch_size=50, check_re
                                     print(f"  legacy evidence incomplete: {staging['missing_files']} missing files, "
                                           f"{len(staging['staging_issues'])} read issues; unproven stages will be recomputed", flush=True)
                         events = []
+                        def paper_progress(index, total, paper, status):
+                            print(f'  finished {index}/{total} | {paper} | {status}', flush=True)
+                            if index < len(papers):
+                                print(f'  parsing {index + 1}/{total} | {papers[index]}', flush=True)
+
+                        if papers:
+                            print(f'  parsing 1/{len(papers)} | {papers[0]}', flush=True)
                         summary = _timed('parse + validation', parse.run,
                             papers, local, input_root=staged, resume=True,
-                            frozen_input=True, observer=events.append)
+                            frozen_input=True, observer=events.append, paper_observer=paper_progress)
                         if migration is not None:
                             events = stage_migration.merge_events(migration['events'], events)
                             count = sum(bool(e.get('migrated')) for e in events)
