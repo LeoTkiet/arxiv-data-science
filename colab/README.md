@@ -53,8 +53,8 @@ chạy `RUN_MODE='SMOKE'` trước. Sau đó đổi sang `FULL`, chạy lại ce
 cell xác nhận phạm vi và cell parsing. Không cần sửa `JOBS` hoặc gõ lại range:
 notebook đọc đúng phân công 5.000 ID từ `configs/ms1_group6_ranges.json`.
 FULL chọn tường minh mọi ID được giao, ghi nhận cả ID thiếu discovery.
-Notebook pin `CODE_REF=3ae67d5553eef652d92e5386eef4248b9d124779`, commit đã merge
-bản sửa MS1/MS2 qua PR #28. Để trống `MS1_INPUT` dùng
+Notebook pin `CODE_REF=949e5ec1b625c0f15cd156084bf97b95e0c65877`, backend đã kiểm thử
+có cơ chế chuyển tiếp stage từ MS2 trước bản vá. Để trống `MS1_INPUT` dùng
 `/content/drive/MyDrive/arxiv_ms1_recovery/<member>/data`. Nếu dữ liệu nằm ở
 thư mục hoặc shortcut khác, nhập đường dẫn mount thực tế đến `data/`, không dùng
 URL Drive hoặc ZIP bằng chứng. Dữ liệu MS1 cần ổn định trước khi chạy.
@@ -76,6 +76,33 @@ lại source. Notebook ưu tiên ID mới rồi thử lại bài có receipt ch�
 Cell parsing in số ID đã lưu, giây/ID và số stage dùng cache. Index/receipt khác
 context làm notebook dừng trước khi sửa output; không đổi về tag cũ để bỏ qua
 kiểm tra này. Snapshot thay đổi thì dùng một tag riêng khác.
+
+Notebook hỗ trợ `LEGACY_MS2_INPUT` để dùng lại từng stage của MS2
+trước bản vá. Backend đọc checkpoint/dependencies/artifact từ thư mục kết quả
+thành viên hoặc `local-batches/`, xác minh hash producer và đầu vào được stage
+sử dụng. Chỉ hierarchy/normalize đủ bằng chứng được chuyển tiếp; các producer
+đã sửa và validation vẫn chạy theo bản hiện tại. Bài đã hoàn tất trên bản sửa
+tiếp tục được bỏ qua, không đọc lại MS2 cũ. Giữ tag mới khi resume.
+
+Để trống cấu hình này sẽ tìm
+`<OUTPUT_ROOT>/ms2-members-20261110/full/<MEMBER>` trước; nếu dùng shortcut,
+nhập đường dẫn mount tới thư mục thành viên. Output ghi `migration-reports/*.json`
+và `migrated_stages`; bằng chứng hash của stage dùng lại nằm trong dependencies
+của checkpoint. Thư mục MS2 cũ chỉ đọc.
+
+Bản sửa ngày 20/11 kiểm tra cấu trúc thư mục MS2 cũ và thành viên trong
+metadata nếu có, trước khi tạo output. Sau khi khôi phục checkpoint hiện tại,
+backend kiểm tra cache cây trên local; chỉ chép bằng chứng cũ cho version còn
+cần kiểm chứng, không chép lại chín file nếu hierarchy/normalize đã hợp lệ.
+SMOKE chọn mẫu từ discovery local, dùng lại ZIP discovery cùng snapshot cho
+lần chọn mẫu và bước parsing tiếp theo. Lần đầu vẫn cần chép discovery từ
+Drive để tạo cache; không bỏ qua kiểm tra discovery mâu thuẫn.
+
+Cell cài đặt tải đúng backend đã pin. Khi notebook báo runtime thiếu chức năng,
+mở bản notebook mới trên GitHub, restart session rồi chạy lại cell cài đặt;
+không bỏ guard hoặc đổi pin về bản cũ. Giữ snapshot MS1 và tag output hiện tại
+khi tiếp tục. Lần đầu chuyển tiếp vẫn cần chép source MS1 và chạy
+resolver/bibliography hiện tại; chưa có benchmark tốc độ trên toàn corpus.
 
 Pilot local trên dữ liệu TV5 sau phục hồi đạt 14/15 paper, không phải nghiệm thu
 toàn bộ 5.000 ID. `2410.03415` v1/v2 còn `empty_include` do source chứa `\input{}`;

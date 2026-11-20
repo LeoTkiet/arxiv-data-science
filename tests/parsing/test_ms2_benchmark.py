@@ -159,6 +159,7 @@ def test_notebook_defaults_to_recovered_input_and_preserves_legacy_output(tmp_pa
     recovered.mkdir(parents=True)
     legacy = tmp_path/'results/ms2-members-20261110/smoke/tv5'
     legacy.mkdir(parents=True)
+    (legacy/'parsed').mkdir()
     marker = legacy/'keep.txt';marker.write_text('Existing results')
 
     def mounted_path(value):
