@@ -17,10 +17,14 @@ def test_clean_latex_accents_and_macros():
     assert clean_latex_text(r"Schr\"{o}dinger and Poincar\'{e}") == "Schrödinger and Poincaré"
     # Accents without braces
     assert clean_latex_text(r"Schr\"odinger and Poincar\'e") == "Schrödinger and Poincaré"
+    # Tilde accents (Peña) with and without braces
+    assert clean_latex_text(r"Pe\~{n}a") == "Peña"
+    assert clean_latex_text(r"Pe\~na") == "Peña"
     # Protective BibTeX braces
     assert clean_latex_text(r"{Deep} {Learning} in {LaTeX}") == "Deep Learning in LaTeX"
-    # Style macros
+    # Style macros including \url preservation
     assert clean_latex_text(r"\textbf{Important} \emph{Survey}") == "Important Survey"
+    assert clean_latex_text(r"\url{https://arxiv.org/abs/2310.12345}") == "https://arxiv.org/abs/2310.12345"
     # Math mode removal
     assert clean_latex_text(r"On the $O(N)$ and $\mathcal{H}_2$ space") == "On the and space"
     # Escaped characters
@@ -38,6 +42,11 @@ def test_normalize_title():
     # Hyphen handling
     assert normalize_title("Self-Supervised Pre-Training") == "self supervised pre training"
 
+    # Preserves URL inside title without corrupting \url to r l
+    url_title = r"Code available at \url{https://arxiv.org/abs/2310.12345}"
+    assert "r l" not in normalize_title(url_title)
+    assert "https arxiv org abs 2310 12345" in normalize_title(url_title)
+
 
 def test_parse_authors():
     assert parse_authors(None) == []
@@ -50,6 +59,11 @@ def test_parse_authors():
     assert parsed[0] == {"last_name": "lecun", "first_name": "yann", "initials": "y"}
     assert parsed[1] == {"last_name": "bengio", "first_name": "yoshua", "initials": "y"}
     assert parsed[2] == {"last_name": "hinton", "first_name": "geoffrey", "initials": "g"}
+
+    # Author with LaTeX tilde accent matches plain Unicode author
+    parsed_latex = parse_authors([r"Pe\~{n}a, Juan"])
+    parsed_unicode = parse_authors(["Peña, Juan"])
+    assert parsed_latex == parsed_unicode == [{"last_name": "peña", "first_name": "juan", "initials": "j"}]
 
     # String with "and"
     raw_str = "John Doe and Jane Smith and Alan Turing et al."

@@ -41,11 +41,12 @@ _LATEX_SPECIALS = [
     (re.compile(r"\\_"), "_"),
     (re.compile(r"\\#"), "#"),
     (re.compile(r"\\\$"), "$"),
+    (re.compile(r"\\~"), "~"),
     (re.compile(r"---"), "-"),
     (re.compile(r"--"), "-"),
     (re.compile(r"``|''"), '"'),
     (re.compile(r"`|'"), "'"),
-    (re.compile(r"~"), " "),
+    (re.compile(r"(?<!\\)~"), " "),
 ]
 
 
@@ -59,15 +60,22 @@ def _replace_latex_accents(text: str) -> str:
             return unicodedata.normalize("NFKC", char + comb)
         return char
 
-    # Pattern for \`{e}, \"{o}, \c{c}, etc.
+    # Pattern 1 for \`{e}, \"{o}, \c{c}, \~{n}, etc. (with braces)
     text = re.sub(
         r"\\([`'^~=.u\"rHvck])\{([a-zA-Z])\}",
         repl_braced,
         text,
     )
-    # Pattern without braces: \'e, \"o, etc.
+    # Pattern 2 without braces for symbol accents ONLY: \'e, \"o, \~n, etc.
+    # Letter accents (u, r, H, v, c, k) are excluded here so macros like \url are not corrupted.
     text = re.sub(
-        r"\\([`'^~=.u\"rHvck])([a-zA-Z])",
+        r"\\([`'^~=.\"])([a-zA-Z])",
+        repl_braced,
+        text,
+    )
+    # Pattern 3 for letter accents with whitespace: \u a, \v c, etc.
+    text = re.sub(
+        r"\\([urHvck])\s+([a-zA-Z])",
         repl_braced,
         text,
     )
@@ -110,17 +118,18 @@ def clean_latex_text(text: str | None) -> str:
     if not isinstance(text, str):
         text = str(text)
 
-    # Substitute LaTeX escaped specials
     s = text
-    for pattern, repl in _LATEX_SPECIALS:
-        s = pattern.sub(repl, s)
 
     # Strip inline math expressions like $x^2 + y$ or \( ... \)
     s = re.sub(r"\$[^$]*\$", " ", s)
     s = re.sub(r"\\\([^\\]*\\\)", " ", s)
 
-    # Convert accent macros to proper Unicode characters
+    # Convert accent macros to proper Unicode characters first, before special char replacement
     s = _replace_latex_accents(s)
+
+    # Substitute LaTeX escaped specials
+    for pattern, repl in _LATEX_SPECIALS:
+        s = pattern.sub(repl, s)
 
     # Unwrap style macros
     s = _unwrap_braces(s)
