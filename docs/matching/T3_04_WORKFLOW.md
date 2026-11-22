@@ -93,8 +93,15 @@ Exit codes: `0` prepare thành công hoặc collect/audit ready; `1` collect/aud
 
 ## Kiểm thử và bằng chứng
 
+Notebook [MS3_Manual_Labeling_CPU.ipynb](../../colab/MS3_Manual_Labeling_CPU.ipynb)
+gọi lại CLI này qua `matching/manual_colab.py`, đóng gói source/config công khai
+với SHA-256 và có 4 bước chạy. Builder ở `scripts/build_ms3_manual_notebook.py`;
+cách chọn Drive paths và chế độ tiến độ/bàn giao ở `colab/README.md`.
+Notebook không yêu cầu push nhánh trước, vì runtime đã nhúng code đúng phiên bản.
+Các input/XLSX/labels thật vẫn nằm ngoài Git.
+
 ```powershell
-python -m pytest tests/matching -q
+python -m pytest tests/matching tests/test_ms3_manual_notebook.py -q
 ```
 
 Tests offline gồm ID text/numeric, shared strings, công thức, bảo toàn pending, source metadata bị sửa, duplicate/query bị xóa, invalid targets/owner, snapshots/hash, AI draft, quota 19/21, thiếu thành viên, self-review và vòng prepare → collect → audit trên 500 query synthetic. Synthetic chỉ kiểm code, không chứng minh quota nhóm thật.

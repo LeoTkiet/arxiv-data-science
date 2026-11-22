@@ -1,5 +1,44 @@
 # Notebook chạy trên CPU
 
+## Milestone 3: T3-04 — thu XLSX và audit nhãn
+
+Mở [MS3_Manual_Labeling_CPU.ipynb](MS3_Manual_Labeling_CPU.ipynb) bằng Colab CPU.
+Notebook có 4 cell chạy: runtime/Drive, cấu hình, prepare–collect–audit và lưu kết quả.
+Code Python/config được đóng gói từ nhánh `feature/m3-tv3-manual-labeling`, ghim bằng
+SHA-256; chạy được trước khi nhánh được push. Không cần GPU, pip hay clone repo.
+Base commit hiển thị là baseline CLI; runtime digest xác định chính xác cả helper Colab.
+
+Input mặc định là `T3-04_inputs.zip` trong thư mục Drive
+`NMKHDL_MS3_T3-04_Gan_nhan_2026-11-22`. ZIP này chỉ chứa 125 artifacts staged của
+25 bài đã chọn, không phải ZIP corpus MS1/MS2. Có thể chọn `prepared_folder` nếu
+đã có prepared snapshot hoàn chỉnh. Đường dẫn cấu hình là path Drive đã mount,
+không phải URL hoặc Drive file ID. Đổi path nếu thư mục thực tế khác mặc định.
+
+Sau review, đặt 5 file `annotation_tvN_reviewed.xlsx` vào `03_DA_REVIEW`, giữ
+`MODE=reviewed`, `ORIGIN=human` và đủ TV1–TV5. Muốn kiểm tra bản TV3 đang pending,
+chọn `MODE=progress`, `ORIGIN=ai_assisted`, `MEMBERS=tv3`, trỏ `WORKBOOK_FOLDER`
+tới `02_DA_GAN_NHAN` và dùng pattern `annotation_{member}_annotated_draft.xlsx`.
+Không chọn phiếu trắng hoặc tự ghi accepted để làm audit đạt.
+
+Cell 3 chép input/XLSX về ổ local rồi gọi CLI hiện có, không sửa nguồn hay phiếu
+gốc. `RUN_ID` trống tạo lượt mới; các output cũ không bị ghi đè. Nếu dữ liệu thiếu,
+cell dừng và chỉ rõ file; nếu collect/audit exit 1, notebook giữ kết quả chưa đạt.
+Cell 4 kiểm lại nhãn/hashes trước khi lưu dưới `04_KET_QUA_COLAB/<run_id>`.
+Chỉ có `handoff.zip` khi audit thật sự đạt và chạy reviewed/human; các lượt khác
+xuất `progress.zip`. Giữ ZIP, labels, audit, manifests và log để TV5 review bàn giao.
+
+Đây là nghiệm thu nhãn manual, chưa bao gồm T3-05, split, training hoặc nghiệm thu
+MS3 toàn pipeline. Readiness của input vẫn ở mức artifacts staged/validation
+reports, không thay thế TV1 xác minh đầy đủ producer checkpoints/dependencies.
+Xem thêm [CLI T3-04](../docs/matching/T3_04_WORKFLOW.md).
+
+Khi code đóng gói thay đổi, tạo lại notebook và kiểm thử:
+
+```powershell
+python scripts/build_ms3_manual_notebook.py
+python -m pytest tests/matching tests/test_ms3_manual_notebook.py -q
+```
+
 ## Milestone 1: phục hồi chọn lọc
 
 Mở [MS1_Selective_Recovery_CPU.ipynb](MS1_Selective_Recovery_CPU.ipynb) bằng Colab CPU.
