@@ -1,0 +1,213 @@
+{
+  "features": [
+    {
+      "name": "title_exact_match",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 0 if either title is empty.",
+      "rationale": "Exact match indicator between cleaned BibTeX title and candidate reference title.",
+      "source_fields": [
+        "title",
+        "ref_title"
+      ]
+    },
+    {
+      "name": "title_jaccard_word",
+      "dtype": "float64",
+      "nullable": false,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "missing_policy": "Defaults to 0.0 if either title has no tokens.",
+      "rationale": "Token-level Jaccard similarity of normalized words in titles.",
+      "source_fields": [
+        "title",
+        "ref_title"
+      ]
+    },
+    {
+      "name": "title_levenshtein_ratio",
+      "dtype": "float64",
+      "nullable": false,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "missing_policy": "Defaults to 0.0 if either title is empty.",
+      "rationale": "Character-level Levenshtein similarity ratio for typo resilience.",
+      "source_fields": [
+        "title",
+        "ref_title"
+      ]
+    },
+    {
+      "name": "title_char_ngram_cosine",
+      "dtype": "float64",
+      "nullable": false,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "missing_policy": "Defaults to 0.0 if either title has fewer than 3 characters.",
+      "rationale": "Cosine similarity of character 3-gram frequencies.",
+      "source_fields": [
+        "title",
+        "ref_title"
+      ]
+    },
+    {
+      "name": "title_len_diff_ratio",
+      "dtype": "float64",
+      "nullable": false,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "missing_policy": "Defaults to 1.0 if either title is empty.",
+      "rationale": "Normalized relative length difference between titles.",
+      "source_fields": [
+        "title",
+        "ref_title"
+      ]
+    },
+    {
+      "name": "author_jaccard_last",
+      "dtype": "float64",
+      "nullable": false,
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "missing_policy": "Defaults to 0.0 if author lists cannot be parsed.",
+      "rationale": "Jaccard similarity between sets of authors' standardized last names.",
+      "source_fields": [
+        "authors",
+        "ref_authors"
+      ]
+    },
+    {
+      "name": "first_author_match",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 0 if first author is missing on either side.",
+      "rationale": "Indicator if primary/first author last name matches exactly.",
+      "source_fields": [
+        "authors",
+        "ref_authors"
+      ]
+    },
+    {
+      "name": "author_count_diff",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 100,
+      "missing_policy": "Defaults to 0 if both lists are empty.",
+      "rationale": "Absolute difference in parsed author counts (capped at 100).",
+      "source_fields": [
+        "authors",
+        "ref_authors"
+      ]
+    },
+    {
+      "name": "doi_exact_match",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 0 if DOI is missing on either side.",
+      "rationale": "High-precision exact match of canonical DOIs.",
+      "source_fields": [
+        "doi"
+      ]
+    },
+    {
+      "name": "has_doi_both",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 0 if either entity lacks a DOI.",
+      "rationale": "Indicator whether both BibTeX and candidate possess DOI metadata.",
+      "source_fields": [
+        "doi"
+      ]
+    },
+    {
+      "name": "arxiv_id_match",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 0 if no arXiv ID can be extracted from BibTeX.",
+      "rationale": "Direct match between BibTeX-extracted arXiv ID and candidate ref_arxiv_id.",
+      "source_fields": [
+        "url",
+        "journal",
+        "citation_key",
+        "ref_arxiv_id"
+      ]
+    },
+    {
+      "name": "year_exact_match",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 0 if year is missing on either side.",
+      "rationale": "Indicator if publication years are identical.",
+      "source_fields": [
+        "year",
+        "ref_submission_date"
+      ]
+    },
+    {
+      "name": "year_diff_abs",
+      "dtype": "float64",
+      "nullable": false,
+      "minimum": 0.0,
+      "maximum": 100.0,
+      "missing_policy": "Imputed to 99.0 if year is missing on either side.",
+      "rationale": "Absolute difference in publication years (penalizes distant citations).",
+      "source_fields": [
+        "year",
+        "ref_submission_date"
+      ]
+    },
+    {
+      "name": "year_is_chronological",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Defaults to 1 if citing year cannot be established.",
+      "rationale": "Physical validity check: cited reference year <= citing publication year.",
+      "source_fields": [
+        "year",
+        "ref_submission_date",
+        "arxiv_id"
+      ]
+    },
+    {
+      "name": "is_bib_year_missing",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Non-null indicator flag (0 or 1).",
+      "rationale": "Missingness indicator flag for BibTeX publication year.",
+      "source_fields": [
+        "year"
+      ]
+    },
+    {
+      "name": "is_ref_year_missing",
+      "dtype": "int64",
+      "nullable": false,
+      "minimum": 0,
+      "maximum": 1,
+      "missing_policy": "Non-null indicator flag (0 or 1).",
+      "rationale": "Missingness indicator flag for Reference publication year.",
+      "source_fields": [
+        "ref_submission_date"
+      ]
+    }
+  ],
+  "schema_version": "3.0",
+  "schema_id": "5176b5c594d38654b01ab708ab15b9483ccc7a35a1057397e80d9fbd7025ba50"
+}
