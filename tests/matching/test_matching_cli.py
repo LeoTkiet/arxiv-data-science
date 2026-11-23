@@ -11,6 +11,12 @@ def test_matching_smoke_cli_and_resume(tmp_path, capsys):
     assert main(['matching', 'smoke', '--output', str(out), '--resume']) == 0
     receipt = json.loads((out / 'manifests/run.json').read_text())
     assert receipt['complete'] and all(s['cached'] for s in receipt['stages'])
+    # Native Windows input paths must not leak into serialized relative artifacts.
+    from arxiv_pipeline.reporting.milestone2.validation import safe_path
+    for stage in receipt['stages']:
+        for relative in stage['artifacts']:
+            assert '\\' not in relative
+            assert safe_path(out, relative).is_file()
 
 
 def test_cli_rejects_fixture_without_explicit_flag(tmp_path):

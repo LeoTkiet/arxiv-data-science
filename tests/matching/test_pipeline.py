@@ -33,6 +33,23 @@ def test_mock_end_to_end_and_resume_has_origin_and_hashes(tmp_path):
     assert all(s['artifacts'] for s in second['stages'])
 
 
+def test_pipeline_keeps_no_data_queries_without_declared_references(tmp_path):
+    from arxiv_pipeline.matching.pipeline import run_matching
+    from tests.matching.test_io import _checkpoint
+    cfg, adapters = setup_run(tmp_path)
+    paper = '2310.12345'
+    _checkpoint(cfg['ms1_root'], 'references', paper, {}, status='no_data', schema='1.0')
+    result = run_matching(cfg, adapters=adapters)
+    assert result['complete']
+    bundle = json.loads((cfg['output'] / f'publications/{paper}/queries.json').read_text())
+    assert bundle
+    payload = json.loads((cfg['output'] / 'matching/rank/_run/result.json').read_text())
+    predictions = [p for p in payload['predictions'] if p['arxiv_id'] == paper]
+    assert len(predictions) == len(bundle)
+    assert all(p['groundtruth_arxiv_id'] is None for p in predictions)
+    assert all(p[f'cand_{i}'] is None for p in predictions for i in range(1, 6))
+
+
 def test_resume_rebuilds_tampered_artifact_and_downstream(tmp_path):
     from arxiv_pipeline.matching.pipeline import run_matching
     cfg, adapters = setup_run(tmp_path)

@@ -110,14 +110,65 @@ def test_fixture_requires_explicit_mode(tmp_path):
     assert load_publication('2310.12345', ctx).readiness == 'invalid'
 
 
-@pytest.mark.parametrize('status', ['success', 'no_data'])
-def test_references_require_declared_artifact_even_for_no_data(tmp_path, status):
+def test_successful_references_still_require_declared_artifact(tmp_path):
     from arxiv_pipeline.matching.io import load_publication
     ctx = ready_snapshot(tmp_path)
-    _checkpoint(ctx['ms1_root'], 'references', '2310.12345', {}, status=status, schema='1.0')
+    _checkpoint(ctx['ms1_root'], 'references', '2310.12345', {}, status='success', schema='1.0')
     bundle = load_publication('2310.12345', ctx)
     assert bundle.readiness == 'invalid'
     assert any('Missing declared references artifact' in issue.message for issue in bundle.issues)
+
+
+def test_no_data_without_references_artifact_preserves_queries_and_provenance(tmp_path):
+    from arxiv_pipeline.matching.io import load_with_provenance
+    ctx = ready_snapshot(tmp_path)
+    _checkpoint(ctx['ms1_root'], 'references', '2310.12345', {}, status='no_data', schema='1.0')
+    before = {str(p): p.read_bytes() for p in tmp_path.rglob('*.json')}
+    loaded = load_with_provenance('2310.12345', ctx)
+    assert loaded.bundle.readiness == 'ready'
+    assert loaded.bundle.references == []
+    assert loaded.bundle.bibtex
+    # A leftover undeclared references file must not become candidate evidence.
+    files = loaded.provenance['files']
+    assert 'ms1/state/stages/references/2310.12345/paper.json' in files
+    assert 'ms1/references/2310.12345.json' not in files
+    assert before == {str(p): p.read_bytes() for p in tmp_path.rglob('*.json')}
+
+
+@pytest.mark.parametrize('status', ['api_error', 'error', 'skipped'])
+def test_failed_references_without_artifact_are_not_empty_success(tmp_path, status):
+    from arxiv_pipeline.matching.io import load_publication
+    ctx = ready_snapshot(tmp_path)
+    _checkpoint(ctx['ms1_root'], 'references', '2310.12345', {}, status=status, schema='1.0')
+    assert load_publication('2310.12345', ctx).readiness == 'not_ready'
+
+
+@pytest.mark.parametrize('bad_qa', [False, True])
+def test_no_data_fallback_keeps_ms1_and_ms2_validation_gates(tmp_path, bad_qa):
+    from arxiv_pipeline.matching.io import load_publication
+    ctx = ready_snapshot(tmp_path)
+    _checkpoint(ctx['ms1_root'], 'references', '2310.12345', {}, status='no_data', schema='1.0')
+    if bad_qa:
+        p = ctx['ms1_root'] / 'validation/2310.12345.json'
+        data = json.loads(p.read_text()); data.update(valid=False, errors=['incomplete MS1'])
+        atomic_json(p, data)
+    else:
+        atomic_json(ctx['ms2_root'] / 'state/parsing/2310.12345.json', dict(arxiv_id='2310.12345', complete=False))
+    assert load_publication('2310.12345', ctx).readiness == 'not_ready'
+
+
+@pytest.mark.parametrize('missing', [False, True])
+def test_no_data_with_declared_references_still_reads_that_artifact(tmp_path, missing):
+    from arxiv_pipeline.matching.io import load_publication
+    ctx = ready_snapshot(tmp_path)
+    _checkpoint(ctx['ms1_root'], 'references', '2310.12345',
+                {'references': 'references/2310.12345.json'}, status='no_data', schema='1.0')
+    p = ctx['ms1_root'] / 'references/2310.12345.json'
+    if missing:
+        p.unlink()
+    else:
+        p.write_text('{bad JSON')
+    assert load_publication('2310.12345', ctx).readiness == ('not_ready' if missing else 'invalid')
 
 
 def test_loader_hashes_bibtex_text_without_decoding_it_as_json(tmp_path):

@@ -42,6 +42,10 @@ Hợp đồng này chưa chứng minh corpus thật đã sẵn sàng.
 - M1: đọc artifact `references` từ checkpoint stage references; layout hiện tại
   là `references/<paper_key>.json`. Kiểm tra status và validation tương ứng;
   file tồn tại đơn lẻ chưa đủ chứng minh producer đã hoàn tất.
+  Checkpoint `no_data` đúng identity/schema có thể không khai báo artifact
+  `references`: khi đó dùng danh sách rỗng, vẫn yêu cầu QA M1 và M2 đạt.
+  Nếu đã khai báo artifact thì phải đọc/kiểm tra file đó; `success` thiếu khai báo
+  hoặc lỗi API không được suy thành references rỗng.
 - Snapshot đầu vào phải bất biến trong lúc chạy; M3 ghi sang output root riêng.
 - Một publication chỉ đưa vào matching một lần sau khi M2 hợp nhất các version.
   Không thêm version vào khóa query để lặp lại entries đã dedup.

@@ -73,7 +73,7 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
                 read_bytes(source, rel)
                 if files[f'{source}/{rel}'] != expected:
                     raise ContractError(f'Artifact hash mismatch: {source}/{rel}')
-        return artifacts
+        return row
 
     def artifact(source, artifacts, name):
         if name not in artifacts:
@@ -86,9 +86,15 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
                 for marker in (root / 'fixture_manifest.json', root.parent / 'fixture_manifest.json'):
                     if marker.is_file() and json.loads(marker.read_text(encoding='utf-8')).get('synthetic'):
                         raise ContractError('Synthetic handoff requires fixture_mode=True')
-        refs_cp = checkpoint('ms1', 'references', '1.0', {'success', 'no_data'})
-        refs = artifact('ms1', refs_cp, 'references')
-        qa1 = artifact('ms1', checkpoint('ms1', 'validate', '1.0', {'success'}), 'validation')
+        refs_stage = checkpoint('ms1', 'references', '1.0', {'success', 'no_data'})
+        refs_cp = refs_stage['artifacts']
+        if refs_stage['status'] == 'no_data' and 'references' not in refs_cp:
+            # The validated checkpoint itself certifies empty references. Do not
+            # infer emptiness for failures or read an undeclared leftover file.
+            refs = []
+        else:
+            refs = artifact('ms1', refs_cp, 'references')
+        qa1 = artifact('ms1', checkpoint('ms1', 'validate', '1.0', {'success'})['artifacts'], 'validation')
         if not isinstance(qa1, dict) or (qa1.get('schema_version'), qa1.get('paper_id')) != ('1.0', paper):
             raise ContractError('M1 validation identity/schema mismatch')
         if qa1.get('valid') is not True or qa1.get('errors') != []:
@@ -98,7 +104,7 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
             raise ContractError('M2 parsing state has wrong publication')
         if state.get('complete') is not True:
             raise _NotReady('M2 parsing is incomplete')
-        dedup = checkpoint('ms2', 'deduplicate', '2.0', {'success', 'no_source'})
+        dedup = checkpoint('ms2', 'deduplicate', '2.0', {'success', 'no_source'})['artifacts']
         manifest = artifact('ms2', dedup, 'parsing_manifest')
         if not isinstance(manifest, dict) or (manifest.get('schema_version'), manifest.get('arxiv_id')) != ('2.0', paper):
             raise ContractError('M2 manifest identity/schema mismatch')
@@ -120,7 +126,7 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
             raise ContractError('M2 version coverage disagrees with parsing state')
         if manifest.get('tables', {}).get('bibtex') != dedup.get('bibtex'):
             raise ContractError('M2 BibTeX path disagrees with manifest')
-        qa2 = artifact('ms2', checkpoint('ms2', 'validate_parse', '2.0', {'success'}), 'validation')
+        qa2 = artifact('ms2', checkpoint('ms2', 'validate_parse', '2.0', {'success'})['artifacts'], 'validation')
         if not isinstance(qa2, dict) or (qa2.get('schema_version'), qa2.get('arxiv_id'),
                 qa2.get('input_snapshot_id')) != ('2.0', paper, snapshot):
             raise ContractError('M2 QA identity/snapshot mismatch')
