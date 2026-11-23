@@ -144,11 +144,13 @@ def build(root, destination):
         paths += [root/'configs/ms1_group6_ranges.json']
         for path in paths:
             info = zipfile.ZipInfo(path.relative_to(root).as_posix(), date_time=(2026,11,18,0,0,0))
+            info.create_system = 3  # Fixed Unix creator matches the portable mode below.
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o100644 << 16
             # Normalize source newlines so the package hash is portable.
             archive.writestr(info, path.read_text(encoding='utf-8').replace('\r\n','\n').encode('utf-8'))
         info = zipfile.ZipInfo('requirements-recovery.txt', date_time=(2026,11,18,0,0,0))
+        info.create_system = 3
         info.compress_type = zipfile.ZIP_DEFLATED
         info.external_attr = 0o100644 << 16
         archive.writestr(info, REQUIREMENTS)
