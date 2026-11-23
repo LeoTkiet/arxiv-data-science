@@ -28,6 +28,109 @@ _YEAR = re.compile(r"(?<![\d.])(1[89]\d{2}|20\d{2})(?![\d])")
 _QUOTED = re.compile(r"``(.+?)''|\"(.+?)\"|\\textquotedblleft\s*(.+?)\s*\\textquotedblright", re.DOTALL)
 _EMPH = re.compile(r"\\(?:emph|textit|textsl)\s*\{((?:[^{}]|\{[^{}]*\})*)\}|\{\\(?:em|it|sl)\s+([^{}]*)\}")
 _INITIALS = re.compile(r"^(?:[A-Z]\.?-?\s*)+$")
+_BIB_HEADER = re.compile(r'@([A-Za-z]+)\s*([{(])')
+_BIB_DELIMITER = re.compile(r'[\\{}()"@]')
+_BIB_KEY = re.compile(r'\s*([^,\s{}()]+)\s*,')
+_CITATION = re.compile(
+    r'\\(?:cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|citenum|nocite|'
+    r'parencite|textcite|autocite|footcite|smartcite)\*?\s*(?:\[[^\]]*\]\s*){0,2}\{([^{}]*)\}')
+
+
+def _bib_blocks(text, *, selected=None):
+    """Index top-level BibTeX blocks in one pass, without parsing unused entries."""
+    pos = 0
+    while match := _BIB_HEADER.search(text, pos):
+        start, body = match.start(), match.end()
+        kind, opening = match.group(1).lower(), match.group(2)
+        key_match = _BIB_KEY.match(text, body) if kind not in {'string','comment','preamble'} else None
+        key = key_match.group(1) if key_match else None
+        malformed = False
+        brace = 1 if opening == '{' else 0
+        base = brace
+        paren, quoted = (1 if opening == '(' else 0), False
+        pos = body
+        while delimiter := _BIB_DELIMITER.search(text, pos):
+            char, pos = delimiter.group(), delimiter.end()
+            if (char == '@' and brace == base and not quoted and
+                    _BIB_HEADER.match(text, delimiter.start()) and
+                    not text[text.rfind('\n', start, delimiter.start()) + 1:delimiter.start()].strip()):
+                if selected is None or key is None or key in selected:
+                    raise ValueError(f'Unclosed BibTeX {kind} block at offset {start}')
+                # Resynchronize only between balanced fields at a new header.
+                # Do not invent a closing brace or parse the malformed entry.
+                pos, malformed = delimiter.start(), True
+                break
+            elif char == '\\':
+                pos += 1
+            elif char == '"' and brace == base:
+                quoted = not quoted
+            elif char == '{':
+                brace += 1
+            elif char == '}':
+                if not (quoted and brace == base): brace -= 1
+                if opening == '{' and brace == 0 and not quoted: break
+            elif opening == '(' and brace == 0 and not quoted:
+                if char == '(': paren += 1
+                elif char == ')':
+                    paren -= 1
+                    if paren == 0: break
+        else:
+            if selected is None or key is None or key in selected or brace != base or quoted:
+                raise ValueError(f'Unclosed BibTeX {kind} block at offset {start}')
+            pos, malformed = len(text), True
+        yield ('malformed' if malformed else kind), key, start, pos
+
+
+def _cited_keys(gathered):
+    """Conservative selection: literals/definitions are not executed citations.
+
+    No recognizable citation or nocite{*} retains the legacy full inventory.
+    Dynamic keys also retain all entries rather than silently dropping data.
+    """
+    from arxiv_pipeline.parsing.resolver import _tokens
+    supported = {'cite','citep','citet','citealp','citealt','citeauthor','citeyear','citeyearpar',
+                 'citenum','nocite','parencite','textcite','autocite','footcite','smartcite'}
+    sources = (gathered.get('preamble_tex',''), gathered.get('merged_body_tex',''))
+    lexed = [list(_tokens(text)) for text in sources]
+    definitions = {}
+    invoked = set()
+    for tokens in lexed:
+        for token in tokens:
+            if token.name == 'definition':
+                commands = re.findall(r'\\([A-Za-z@]+)', token.value)
+                if len(commands) > 1:
+                    definitions.setdefault(commands[1], set()).update(commands[2:])
+                if commands and commands[0].endswith('environment') and any('cite' in c.lower() for c in commands):
+                    return None
+            else:
+                invoked.add(token.name)
+                if token.name == 'let' or ('cite' in token.name.lower() and token.name not in supported):
+                    return None
+    # A called macro may generate citations using arguments or another macro.
+    # Retain the full library whenever that execution cannot be selected literally.
+    pending = list(invoked & definitions.keys())
+    visited = set()
+    while pending:
+        name = pending.pop()
+        if name in visited: continue
+        visited.add(name)
+        commands = definitions.get(name, set())
+        if any('cite' in command.lower() for command in commands): return None
+        pending.extend(commands & definitions.keys())
+    keys, recognized = set(), False
+    for text,tokens in zip(sources,lexed):
+        starts = {t.start for t in tokens if t.name in supported}
+        matched = set()
+        for match in _CITATION.finditer(text):
+            if match.start() not in starts: continue
+            matched.add(match.start())
+            recognized = True
+            for key in match.group(1).split(','):
+                key = key.strip()
+                if key == '*' or '\\' in key or '#' in key: return None
+                if key: keys.add(key)
+        if matched != starts: return None
+    return keys if recognized else None
 
 
 def safe_join(root, relative: str) -> Path:
@@ -131,12 +234,15 @@ def _bib_name(name: str) -> str:
     return name
 
 
-def parse_bib_text(text: str):
+def parse_bib_text(text: str, *, strings=None, inherit_crossrefs=False):
     """Parse the content of a .bib file into (list of fields dicts, warnings)."""
     import bibtexparser                                     # imported late: only this stage needs it
     from bibtexparser.bparser import BibTexParser
 
-    parser = BibTexParser(common_strings=True, ignore_nonstandard_types=False, homogenize_fields=False)
+    parser = BibTexParser(common_strings=True, ignore_nonstandard_types=False, homogenize_fields=False,
+                          add_missing_from_crossref=inherit_crossrefs)
+    if strings:
+        parser.bib_database.strings.update(strings)
     db = bibtexparser.loads(text, parser=parser)
     rows, warnings = [], []
     for entry in db.entries:
@@ -166,6 +272,7 @@ def parse_bib_text(text: str):
 
 
 def _row(arxiv_id: str, fields: dict) -> dict:
+    fields = dict(fields, authors=[_bib_name(name) for name in fields['authors']])
     return asdict(BibtexRow(arxiv_id=arxiv_id, **fields))
 
 
@@ -217,8 +324,9 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
         if gathered.get("input_snapshot_id") != snapshot:
             raise ValueError("Gathered snapshot does not match the runtime context")
         raw_items, bib_all = gathered.get("raw_bibitems", []), gathered.get("bib_file_paths", [])
+        supplemental_items = gathered.get('archive_bibitems', [])
         bib_used = gathered.get("referenced_bib_file_paths", [])
-        for name, value in (("raw_bibitems", raw_items), ("bib_file_paths", bib_all),
+        for name, value in (("raw_bibitems", raw_items), ('archive_bibitems', supplemental_items), ("bib_file_paths", bib_all),
                             ("referenced_bib_file_paths", bib_used)):
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ValueError(f"Gathered {name} must be a list of strings")
@@ -226,6 +334,31 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
         bib_paths = bib_used or bib_all
 
         entries, items, warnings = [], [], []
+        # Parse definitions without interpolating entries first: a cited file
+        # may use symbols defined by a sibling bibliography of this version.
+        import bibtexparser
+        from bibtexparser.bparser import BibTexParser
+        context_paths = [relative for relative in bib_all if safe_join(input_root, relative).is_file()]
+        libraries, malformed_keys = {}, set()
+        selected = _cited_keys(gathered)
+        string_blocks, entry_index = [], {}
+        for relative in context_paths:
+            text = safe_join(input_root, relative).read_text(encoding='utf-8', errors='replace')
+            blocks = list(_bib_blocks(text, selected=selected))
+            libraries[relative] = (text, blocks)
+            for kind, citation_key, start, end in blocks:
+                if kind == 'malformed':
+                    malformed_keys.add(citation_key)
+                    warnings.append(dict(code='bib_malformed_uncited_entry', source_path=relative,
+                        message=f'Unclosed uncited entry {citation_key!r} at offsets {start}:{end}; not parsed.'))
+                elif kind == 'string': string_blocks.append(text[start:end])
+                elif citation_key is not None:
+                    entry_index.setdefault(citation_key, []).append((relative, start, end))
+        context_text = '\n'.join(string_blocks)
+        context_db = bibtexparser.loads(context_text, parser=BibTexParser(interpolate_strings=False))
+        # Keep expressions lazy: an unused alias may legitimately reference an
+        # unavailable journal macro. A used undefined symbol still raises.
+        strings = context_db.strings
         for raw in raw_items:
             fields, provenance = parse_bibitem(raw)
             if fields is None:
@@ -241,12 +374,52 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
                 warnings.append(dict(code="bib_file_missing", message="Listed .bib file does not exist.",
                                      source_path=relative))
                 continue
-            rows, bib_warnings = parse_bib_text(path.read_text(encoding="utf-8", errors="replace"))
+            text, blocks = libraries[relative]
+            own = [(citation_key,start,end) for kind,citation_key,start,end in blocks
+                   if kind not in {'string','comment','preamble','malformed'}
+                   and (selected is None or citation_key in selected)]
+            parse_parts = [text[start:end] for _,start,end in own]
+            included = {citation_key for citation_key,_,_ in own}
+            # Crossref parents are dependencies, not automatically printed rows.
+            pending = list(parse_parts)
+            while pending:
+                part = pending.pop()
+                for parent in re.findall(r'\b(?:crossref|xref)\s*=\s*[{\"]([^}\"]+)[}\"]', part, re.I):
+                    if parent in malformed_keys:
+                        raise ValueError(f'Crossref dependency {parent!r} is malformed')
+                    if parent in included: continue
+                    included.add(parent)
+                    for origin,start,end in entry_index.get(parent, []):
+                        parent_text = libraries[origin][0][start:end]
+                        parse_parts.append(parent_text); pending.append(parent_text)
+            rows, bib_warnings = parse_bib_text('\n'.join(parse_parts), strings=strings, inherit_crossrefs=True)
+            if selected is not None:
+                omitted = sum(1 for kind,k,_,_ in blocks if kind not in {'string','comment','preamble'} and k not in selected)
+                if omitted:
+                    warnings.append(dict(code='bib_uncited_entries_omitted',source_path=relative,
+                                         message=f'{omitted} library entries are not cited by this version.'))
+            own_keys = {k for k,_,_ in own}
+            rows = [row for row in rows if row['citation_key'] in own_keys]
             warnings.extend(dict(w, source_path=relative) for w in bib_warnings)
             for fields in rows:
                 entries.append(_row(paper_id, fields))
                 items.append(dict(citation_key=fields["citation_key"], source="bib_file", source_path=relative,
                                   parsed=True))
+        known = {row['citation_key'] for row in entries}
+        for raw in supplemental_items:
+            fields, provenance = parse_bibitem(raw)
+            if fields is None: continue
+            citation_key = fields['citation_key']
+            if citation_key in known or (selected is not None and citation_key not in selected): continue
+            entries.append(_row(paper_id, fields))
+            known.add(citation_key)
+            items.append(dict(provenance, source='archive_bibitem', parsed=True))
+            warnings.append(dict(code='bib_archive_supplement', source_path=None,
+                                 message=f'Entry {citation_key!r} missing from library; recovered from same-jobname BBL.'))
+        if selected is not None:
+            for unresolved_key in sorted(selected - known):
+                warnings.append(dict(code='bib_citation_unresolved', source_path=None,
+                                     message=f'Cited key {unresolved_key!r} has no extractable entry in the supplied sources.'))
         out_status = "success" if entries else "no_source"
         if not entries and status == "success":
             warnings.append(dict(code="bib_source_missing", message="TeX source has no extractable reference list.",
@@ -255,7 +428,10 @@ def run(record: dict, output_dir: Path, *, version: dict | None = None,
         relative = f"parsed/{key}/v{number}/raw_bibtex.json"
         side = f"parsed/{key}/v{number}/raw_bibtex.provenance.json"
         atomic_json(safe_join(output, relative), dict(header, entries=entries, warnings=warnings))
-        atomic_json(safe_join(output, side), dict(header, items=items))
+        atomic_json(safe_join(output, side), dict(header, items=items,
+                    string_context=dict(source_paths=context_paths, symbols=sorted(strings)),
+                    selection=dict(mode='full_inventory' if selected is None else 'cited_keys',
+                                   citation_keys=sorted(selected) if selected is not None else None)))
         size = safe_join(output, relative).stat().st_size + safe_join(output, side).stat().st_size
         return result(out_status, {"raw_bibtex": relative, "provenance": side}, size=size)
     except (ValueError, TypeError, KeyError) as exc:

@@ -1,6 +1,7 @@
 """Durable orchestration. Modules are loaded only when crawl is requested."""
 
 from collections import Counter
+from datetime import datetime
 import hashlib
 import importlib
 import json
@@ -56,8 +57,20 @@ def _artifacts_exist(result, output):
             path = (output / relative).resolve()
             if not path.is_relative_to(out_res) or not path.exists():
                 return False
+        if result.get('stage') == 'download' and result.get('status') == 'success' and 'source' in result['artifacts']:
+            source = output / result['artifacts']['source']
+            metadata = result['artifacts'].get('download_metadata')
+            meta = _read(output / metadata) if metadata else None
+            if not isinstance(meta, dict) or source.stat().st_size <= 0 or meta.get('raw_size_bytes') != source.stat().st_size:
+                return False
+            h = hashlib.sha256()
+            with source.open('rb') as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    h.update(chunk)
+            if meta.get('sha256') != h.hexdigest():
+                return False
         return True
-    except (TypeError, AttributeError, ValueError):
+    except (TypeError, AttributeError, ValueError, OSError):
         return False
 
 
@@ -89,10 +102,20 @@ def _run_stage(stage, record, output, version, upstream, resume, observer=None):
                 atomic_json(path, cached)
 
     terminal_statuses = {"success", "no_source", "not_indexed", "no_data"}
-    if stage == "validate":
-        terminal_statuses.add("data_error")
-    if stage == "extract":
-        terminal_statuses.add("skipped")
+    # A previously skipped extraction or failed QA is not evidence that repaired
+    # upstream data has been processed. Re-run those adapters on resume.
+    if isinstance(cached, dict) and stage in {'extract', 'validate'}:
+        try:
+            saved_at = datetime.fromisoformat(cached['timestamp'])
+            if stage == 'extract':
+                producers = [upstream] if upstream else []
+            else:
+                producers = [_read(p) for name in MODULES if name != 'validate'
+                             for p in (output / 'state/stages' / name / paper_key(record['arxiv_id'])).glob('*.json')]
+            if any(not isinstance(p, dict) or datetime.fromisoformat(p['timestamp']) > saved_at for p in producers):
+                cached = None
+        except (ValueError, KeyError, TypeError):
+            cached = None
 
     upstream_ok = (upstream is None or upstream["status"] == "success"
                    or (stage == "extract" and upstream.get("status") == "no_source"))

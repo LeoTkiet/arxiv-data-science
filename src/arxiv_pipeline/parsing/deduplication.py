@@ -142,7 +142,7 @@ def rename_citations(text: str, key_mapping: dict, known_keys=None):
 def render_bibtex(rows) -> str:
     """Standard BibTeX text of the merged table."""
     def value(text):
-        return str(text).replace("{", "").replace("}", "")
+        return re.sub(r'(?<!\\)%', r'\\%', str(text))
 
     chunks = []
     for row in rows:

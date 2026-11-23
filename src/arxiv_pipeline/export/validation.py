@@ -16,15 +16,17 @@ from arxiv_pipeline.crawling.metadata import build_metadata
 from arxiv_pipeline.reporting.milestone2.validation import run as run_ms2
 
 
-def run(record, output_dir, *, version=None, upstream=None):
-    if upstream and 'deduplicate' in (upstream.get('stages') or {}):
-        return run_ms2(record, output_dir, version=version, upstream=upstream)
-    """Validate one discovered paper and persist validation/<paper_key>.json.
+def run(record, output_dir, *, version=None, upstream=None, write_report=True):
+    """Validate one paper; write_report=False returns the read-only MS1 QA report.
 
     No API calls or corpus mutations. Unreadable/malformed inputs become structured
     errors; failure to write the report is left to the orchestrator's I/O handling.
     Paths are relative to output_dir; symlinks and paths escaping it are rejected.
     """
+    if upstream and 'deduplicate' in (upstream.get('stages') or {}):
+        if not write_report:
+            raise ValueError('Read-only report mode is supported only for MS1')
+        return run_ms2(record, output_dir, version=version, upstream=upstream)
     output = Path(output_dir).resolve()
     paper_id = record['arxiv_id']
     key = paper_key(paper_id)
@@ -252,6 +254,8 @@ def run(record, output_dir, *, version=None, upstream=None):
     report = dict(schema_version=SCHEMA_VERSION, paper_id=paper_id, timestamp=utc_now(),
                   valid=not errors, counts=counts, outcomes=outcomes, errors=errors,
                   warnings=warnings, duplicate_files=duplicates)
+    if not write_report:
+        return report
     # Validate the destination too, before atomic_json creates any parent directory.
     destination = safe_path(relative)
     atomic_json(destination, report)
