@@ -288,6 +288,24 @@ Nếu TV5 chưa bàn giao `prediction.build_predictions`, bước rank dùng
 Payload rank ghi tên hàm đã dùng; lỗi import/thực thi của API TV5 đã bàn giao
 vẫn làm stage thất bại. Split, evaluate và export chưa bàn giao vẫn báo lỗi.
 
+Binding TV1 dùng API TV5: `split.create_split`,
+`prediction.build_predictions(bundles, None, scores, labels, partition_manifest)`,
+`evaluation.evaluate` và `export.export_dataset`. Snapshot nhãn được truyền
+bằng keyword `label_snapshot_id`; split kiểm quota trên population được giao,
+đủ nhãn manual và coverage auto. Report TV5 được giữ trong `report`,
+cùng `mrr_at_5` và số query supervised để pipeline kiểm tra.
+
+Run toàn luồng đọc thêm checkpoint metadata MS1 và các bảng elements/hierarchy
+đã dedup của MS2 ngay khi tạo snapshot. Năm bảng nguồn cùng hash được giữ cho
+export, không đọc lại một snapshot khác ở cuối lượt chạy. API loader publication
+độc lập vẫn hỗ trợ đầu vào tối thiểu BibTeX/references.
+
+Export ghi sáu bảng tại `dataset/data/<table>/`, manifest và dataset card trong
+`dataset/`. Mọi shard và sidecar đều được khai báo để checkpoint hash/kiểm tra
+khi resume. References không có arXiv ID được lọc qua API TV5 cho bản xuất;
+dữ liệu nguồn giữ nguyên. `matching run` chỉ xuất local; publication lên Hub
+là bước riêng của TV5. Chế độ fixture tiếp tục đánh dấu export synthetic.
+
 Loader giữ quy ước MS2: đủ version `1..N` khớp parsing state, manifest và QA.
 Version không có source vẫn giữ trong manifest với trạng thái `no_source`.
 Danh sách khuyết như `[2]` hoặc `[1, 3]` chưa đáp ứng contract MS2 hiện tại;
@@ -295,9 +313,9 @@ không tự bỏ version để nhận snapshot đó là complete. Lỗi của b�
 các bài khác vẫn được kiểm tra; run có lỗi chặn giữ `complete=false`.
 
 Các module chưa bàn giao trả `not_implemented`, run có `complete=false` và
-exit code `1`. Không tự chuyển sang mock trong chế độ production. Hiện loader
-và framework có thể chạy độc lập; nghiệm thu end-to-end bằng module thật còn
-phụ thuộc TV2/TV3/TV5. Một publication lỗi vẫn giữ kết quả của các bài khác,
+exit code `1`. Không tự chuyển sang mock trong chế độ production. Bản tích hợp
+cần các module TV5 đã bàn giao và dữ liệu/nhãn thật để nghiệm thu. Một publication
+lỗi vẫn giữ kết quả của các bài khác,
 nhưng chặn train/export của lượt tích hợp để không âm thầm đổi tập đánh giá.
 
 `manifests/run.json` ghi schema 3.0, source version (`-dirty` nếu chưa commit),

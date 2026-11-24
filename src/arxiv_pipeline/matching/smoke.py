@@ -140,17 +140,26 @@ def prepare_fixture(root):
         if index == 0:
             refs.append(dict(refs[0], ref_arxiv_id='2001.00008', ref_title='Synthetic negative candidate'))
         ms1, ms2 = config['ms1_root'], config['ms2_root']
+        rel = f'metadata/{key}.json'
+        atomic_json(ms1 / rel, dict(schema_version='1.0', arxiv_id=paper,
+            title=f'Synthetic publication {paper}', authors=['Synthetic Author'],
+            submission_date='2023-10-01T00:00:00Z', revised_dates=[], venue=None))
+        checkpoint(ms1, 'metadata', paper, {'metadata': rel}, 'success', '1.0')
         rel = f'references/{key}.json'; atomic_json(ms1 / rel, refs)
         checkpoint(ms1, 'references', paper, {'references': rel}, 'success' if refs else 'no_data', '1.0')
         rel = f'validation/{key}.json'
         atomic_json(ms1 / rel, dict(schema_version='1.0', paper_id=paper, valid=True, errors=[]))
         checkpoint(ms1, 'validate', paper, {'validation': rel}, 'success', '1.0')
         rel = f'tables/{key}/bibtex.json'; atomic_json(ms2 / rel, [bib])
+        tables = dict(bibtex=rel)
+        for name in ('elements', 'hierarchy'):
+            tables[name] = f'tables/{key}/{name}.json'
+            atomic_json(ms2 / tables[name], [])
         pm = f'tables/{key}/parsing_manifest.json'
         atomic_json(ms2 / pm, dict(schema_version='2.0', arxiv_id=paper, complete=True,
             input_snapshot_id='synthetic-ms1', expected_versions=[1],
-            versions=[dict(version=1, status='success')], tables={'bibtex': rel}))
-        checkpoint(ms2, 'deduplicate', paper, {'bibtex': rel, 'parsing_manifest': pm}, 'success', '2.0')
+            versions=[dict(version=1, status='success')], tables=tables))
+        checkpoint(ms2, 'deduplicate', paper, dict(tables, parsing_manifest=pm), 'success', '2.0')
         rel = f'validation/parsing/{key}.json'
         atomic_json(ms2 / rel, dict(schema_version='2.0', arxiv_id=paper, valid=True,
                                   errors=[], input_snapshot_id='synthetic-ms1'))

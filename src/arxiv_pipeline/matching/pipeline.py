@@ -279,7 +279,7 @@ def run_matching(config, *, adapters=None):
     from arxiv_pipeline.matching.adapters import default_adapters
     runner = _Runner(config, default_adapters() if adapters is None else adapters, manifest)
     runner.publish()  # Invalidate a previous complete receipt before any work.
-    loaded = [load_with_provenance(p, config) for p in sorted(ids)]
+    loaded = [load_with_provenance(p, config, include_export_tables=True) for p in sorted(ids)]
     for item in loaded:
         bundle = item.bundle
         manifest['publications'].append(dict(arxiv_id=bundle.arxiv_id, readiness=bundle.readiness,
@@ -297,7 +297,12 @@ def run_matching(config, *, adapters=None):
             for i in loaded})
     population_id = digest(dict(ids=sorted(ids), snapshots=manifests))
     ctx = dict(config=config, bundles=[i.bundle for i in loaded if i.bundle.readiness == 'ready'],
-               labels=labels, population_snapshot_id=population_id)
+               labels=labels, population_snapshot_id=population_id,
+               source_tables={name: [row for item in loaded if item.source_tables is not None
+                                     for row in item.source_tables[name]]
+                              for name in ('papers', 'references', 'elements', 'hierarchy', 'bibtex')},
+               **{name: manifest[name] for name in
+                  ('run_id', 'source_version', 'ms1_snapshot_id', 'ms2_snapshot_id')})
     ready = len(ctx['bundles']) == len(ids)
     all_labels, dependencies = [], []
     # Keep processing other publications when one loader/adapter fails.

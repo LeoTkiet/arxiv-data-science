@@ -61,7 +61,8 @@ def test_rank_prefers_delivered_tv5_api(tmp_path, monkeypatch):
     original = baseline.rank_top5_predictions
     ctx = ranking_context()
 
-    def delivered(bundles, scores, labels, manifest):
+    def delivered(bundles, candidates, scores, labels, manifest):
+        assert candidates is None
         assert labels is ctx['labels'] and manifest is ctx['partition_manifest']
         return original(bundles, scores, manifest, labels)
 

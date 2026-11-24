@@ -218,7 +218,8 @@ Mỗi candidate xuất hiện một lần, thuộc cùng publication; điền nu
 khi có ít hơn năm references. Thiếu score của pair dự kiến, duplicate score
 hoặc score không hữu hạn là lỗi, không thay bằng 0.
 
-Binding TV1 ưu tiên `prediction.build_predictions` của TV5. Khi API này chưa
+Binding TV1 ưu tiên API TV5 theo dạng bundle:
+`prediction.build_predictions(bundles, None, scores, labels, partition_manifest)`. Khi API chưa
 có, dùng `baseline.rank_top5_predictions(bundles, scores, manifest=..., labels=...)`
 của TV2 để xếp hạng chính score đã được kiểm tra, không thay bằng heuristic score.
 Payload rank ghi hàm đã dùng. Lỗi import hoặc thực thi của API TV5 đã có không

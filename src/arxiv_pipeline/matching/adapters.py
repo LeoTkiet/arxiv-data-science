@@ -36,11 +36,12 @@ def split(ctx, output):
     path = ctx['config'].get('partitions')
     if path:
         return {'partitions': _read(path)}
-    create = _function('splitting', 'create_split')
+    create = _function('split', 'create_split')
     result = create(ctx['labels'], dict(population_count=ctx['config']['population_count'],
-        population_snapshot_id=ctx['population_snapshot_id'],
-        label_snapshot_id=digest([r.to_dict() for r in ctx['labels']])),
-        seed=ctx['config']['seed'], group_size=ctx['config'].get('group_size', 5))
+        population_snapshot_id=ctx['population_snapshot_id']),
+        seed=ctx['config']['seed'], group_size=ctx['config'].get('group_size', 5),
+        label_snapshot_id=digest([r.to_dict() for r in ctx['labels']]),
+        bundles=ctx['bundles'], require_full_auto_coverage=True)
     return {'partitions': result.to_dict()}
 
 
@@ -99,7 +100,7 @@ def rank(ctx, output):
     # Import/runtime failures in a delivered provider must remain visible.
     prediction = importlib.import_module('arxiv_pipeline.matching.prediction')
     if hasattr(prediction, 'build_predictions'):
-        rows = prediction.build_predictions(ctx['split_bundles'], scores,
+        rows = prediction.build_predictions(ctx['split_bundles'], None, scores,
                                             ctx['labels'], ctx['partition_manifest'])
         ranker = 'prediction.build_predictions'
     else:
@@ -115,13 +116,44 @@ def evaluate(ctx, output):
     function = _function('evaluation', 'evaluate')
     result = function([RankedPrediction(**r) for r in ctx['rank']['predictions']],
                       ctx['labels'], ctx['partition_manifest'], partition='test')
-    return result.to_dict() if hasattr(result, 'to_dict') else result
+    report = result.to_dict() if hasattr(result, 'to_dict') else result
+    return dict(mrr_at_5=report['metrics']['mrr_at_5'],
+                queries=report['metrics']['counts']['total_labeled'], report=report)
 
 
 def export(ctx, output):
     # Export owns six-table schema/read-back checks; TV1 only binds the seam.
-    function = _function('publish', 'export_dataset')
-    return function(ctx, output)
+    from arxiv_pipeline.matching.contracts import ContractError, RankedPrediction
+    from arxiv_pipeline.matching.pipeline import StageOutput, TABLES
+    from arxiv_pipeline.reporting.milestone2.validation import safe_path
+    function = _function('export', 'export_dataset')
+    prepare_references = _function('export', 'prepare_published_references')
+    source = dict(ctx['source_tables'])
+    source['references'], reference_stats = prepare_references(source['references'])
+    # Validate every destination before TV5 starts writing, including old symlinks.
+    for relative in ('dataset/export_manifest.json', 'dataset/README.md',
+                     *(f'dataset/data/{name}' for name in sorted(TABLES))):
+        safe_path(output, relative)
+    root = safe_path(output, 'dataset')
+    predictions = [RankedPrediction(**r) for r in ctx['rank']['predictions']]
+    synthetic = bool(ctx['config'].get('fixture_mode'))
+    provenance = {name: ctx[name] for name in
+                  ('run_id', 'source_version', 'ms1_snapshot_id', 'ms2_snapshot_id') if name in ctx}
+    provenance.update(split_id=ctx['partition_manifest'].split_id,
+        label_snapshot_id=ctx['partition_manifest'].label_snapshot_id,
+        population_snapshot_id=ctx['population_snapshot_id'])
+    manifest = function(source, predictions, root, partition_manifest=ctx['partition_manifest'],
+        max_rows_per_shard=ctx['config'].get('max_rows_per_shard', 100_000),
+        synthetic=synthetic, provenance=provenance)
+    if (manifest.readback_verified is not True or manifest.synthetic is not synthetic
+            or set(manifest.tables) != TABLES):
+        raise ContractError('TV5 export did not verify the six-table handoff')
+    tables = {name: [safe_path(root, shard['path']).relative_to(output).as_posix()
+                    for shard in info['shards']] for name, info in manifest.tables.items()}
+    sidecars = ['dataset/export_manifest.json', 'dataset/README.md']
+    return StageOutput(dict(tables=tables, export_manifest=sidecars[0],
+        dataset_card=sidecars[1], synthetic=synthetic, reference_filter=reference_stats),
+        sidecars + [path for paths in tables.values() for path in paths])
 
 
 def default_adapters():

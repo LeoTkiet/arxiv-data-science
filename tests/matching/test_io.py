@@ -8,11 +8,11 @@ from arxiv_pipeline.common.utils import atomic_json
 from tests.fixtures.matching.examples import publications
 
 
-def ready_snapshot(root):
+def ready_snapshot(root, items=None):
     """A small explicit synthetic upstream handoff with real checkpoint shapes."""
     ms1, ms2 = root / 'ms1', root / 'ms2'
     atomic_json(root / 'fixture_manifest.json', {'synthetic': True})
-    for item in publications():
+    for item in publications() if items is None else items:
         paper = item['arxiv_id']
         from arxiv_pipeline.common.utils import paper_key
         key = paper_key(paper)
@@ -20,17 +20,29 @@ def ready_snapshot(root):
         atomic_json(ms1 / refs, item['references'])
         _checkpoint(ms1, 'references', paper, {'references': refs},
                     status='success' if item['references'] else 'no_data', schema='1.0')
+        metadata = f'metadata/{key}.json'
+        atomic_json(ms1 / metadata, dict(schema_version='1.0', arxiv_id=paper,
+            title=f'Synthetic publication {paper}', authors=['Synthetic Author'],
+            submission_date='2023-10-01T00:00:00Z', revised_dates=[], venue=None))
+        _checkpoint(ms1, 'metadata', paper, {'metadata': metadata}, schema='1.0')
         report = f'validation/{key}.json'
         atomic_json(ms1 / report, dict(schema_version='1.0', paper_id=paper,
                                      valid=True, errors=[]))
         _checkpoint(ms1, 'validate', paper, {'validation': report}, schema='1.0')
         bib = f'tables/{key}/bibtex.json'
         atomic_json(ms2 / bib, [dict(row, arxiv_id=paper) for row in item['bibtex']])
+        elements, hierarchy = f'tables/{key}/elements.json', f'tables/{key}/hierarchy.json'
+        atomic_json(ms2 / elements, [dict(arxiv_id=paper, element_id=f'{key}:root',
+            kind='document', content='Synthetic document'), dict(arxiv_id=paper,
+            element_id=f'{key}:s1', kind='sentence', content='Synthetic sentence.')])
+        atomic_json(ms2 / hierarchy, [dict(arxiv_id=paper, version=1,
+            element_id=f'{key}:s1', parent_id=f'{key}:root')])
+        tables = dict(bibtex=bib, elements=elements, hierarchy=hierarchy)
         manifest = f'tables/{key}/parsing_manifest.json'
         atomic_json(ms2 / manifest, dict(schema_version='2.0', arxiv_id=paper,
             complete=True, input_snapshot_id='synthetic-ms1', expected_versions=[1],
-            versions=[dict(version=1, status='success')], tables={'bibtex': bib}))
-        _checkpoint(ms2, 'deduplicate', paper, {'bibtex': bib, 'parsing_manifest': manifest})
+            versions=[dict(version=1, status='success')], tables=tables))
+        _checkpoint(ms2, 'deduplicate', paper, dict(tables, parsing_manifest=manifest))
         report = f'validation/parsing/{key}.json'
         atomic_json(ms2 / report, dict(schema_version='2.0', arxiv_id=paper,
             valid=True, errors=[], input_snapshot_id='synthetic-ms1'))
@@ -53,6 +65,44 @@ def _checkpoint(root, stage, paper, artifacts, status='success', schema='2.0'):
 def test_loader_requires_an_implemented_boundary(tmp_path):
     from arxiv_pipeline.matching import io
     assert callable(getattr(io, 'load_publication', None)), 'T1-02 loader is missing'
+
+
+def test_full_pipeline_inputs_include_five_tables_and_frozen_provenance(tmp_path):
+    from arxiv_pipeline.matching.io import load_with_provenance
+    ctx = ready_snapshot(tmp_path)
+    before = {str(p): p.read_bytes() for p in tmp_path.rglob('*.json')}
+    loaded = load_with_provenance('2310.12345', ctx, include_export_tables=True)
+    assert loaded.bundle.readiness == 'ready'
+    assert set(loaded.source_tables) == {'papers', 'references', 'elements', 'hierarchy', 'bibtex'}
+    assert loaded.source_tables['papers'][0]['arxiv_id'] == '2310.12345'
+    assert loaded.source_tables['elements'] and loaded.source_tables['hierarchy']
+    assert 'ms1/metadata/2310.12345.json' in loaded.provenance['files']
+    assert 'ms1/state/stages/metadata/2310.12345/paper.json' in loaded.provenance['files']
+    assert 'ms2/tables/2310.12345/elements.json' in loaded.provenance['files']
+    assert before == {str(p): p.read_bytes() for p in tmp_path.rglob('*.json')}
+
+
+@pytest.mark.parametrize('bad', ['missing_metadata', 'foreign_metadata', 'changed_table_path'])
+def test_full_pipeline_input_tables_cannot_bypass_readiness(tmp_path, bad):
+    from arxiv_pipeline.matching.io import load_with_provenance
+    ctx = ready_snapshot(tmp_path)
+    if bad == 'missing_metadata':
+        (ctx['ms1_root'] / 'state/stages/metadata/2310.12345/paper.json').unlink()
+    elif bad == 'foreign_metadata':
+        path = ctx['ms1_root'] / 'metadata/2310.12345.json'
+        doc = json.loads(path.read_text()); doc['arxiv_id'] = '2310.12346'
+        atomic_json(path, doc)
+    else:
+        root = ctx['ms2_root']
+        path = root / 'tables/2310.12345/parsing_manifest.json'
+        doc = json.loads(path.read_text()); doc['tables']['elements'] = 'tables/2310.12346/elements.json'
+        atomic_json(path, doc)
+        _checkpoint(root, 'deduplicate', '2310.12345', dict(
+            bibtex='tables/2310.12345/bibtex.json', elements='tables/2310.12345/elements.json',
+            hierarchy='tables/2310.12345/hierarchy.json', parsing_manifest='tables/2310.12345/parsing_manifest.json'))
+    loaded = load_with_provenance('2310.12345', ctx, include_export_tables=True)
+    assert loaded.bundle.readiness == ('not_ready' if bad == 'missing_metadata' else 'invalid')
+    assert loaded.source_tables is None
 
 
 def _set_versions(ctx, expected, statuses=None):
