@@ -220,3 +220,17 @@ python -m pytest tests/matching/test_evaluation.py tests/matching/test_export.py
 # Chạy toàn bộ test suite (MS1 + MS2 + MS3)
 python -m pytest -q
 ```
+
+## TV3 — T3-04: phiếu XLSX và audit nhãn thủ công
+
+Code offline đã có để chuẩn bị phiếu XLSX giữ ID dạng text, nhập kết quả gán
+nhãn và kiểm tra quota từng bài/từng thành viên. Lệnh chạy và cấu trúc đầu vào
+ở [docs/matching/T3_04_WORKFLOW.md](docs/matching/T3_04_WORKFLOW.md).
+Danh sách phân công nhỏ nằm trong `configs/ms3_manual_assignments.json`;
+corpus, phiếu thật, nhãn và kết quả vẫn lưu ngoài Git. Code này không thay thế
+loader snapshot TV1 hoặc tự xác nhận hoàn thành quota dữ liệu thật.
+
+```powershell
+python scripts/manual_labeling.py --help
+python -m pytest tests/matching/test_manual_workflow.py -q
+```
