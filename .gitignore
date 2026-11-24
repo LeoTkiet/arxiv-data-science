@@ -225,3 +225,4 @@ __marimo__/
 /demo-output/
 /artifacts/
 *.egg-info/
+*.patch
