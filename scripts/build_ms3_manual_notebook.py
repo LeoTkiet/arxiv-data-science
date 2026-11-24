@@ -189,7 +189,8 @@ def build(root: Path, destination: Path) -> str:
                 ## Đọc kết quả và lưu
 
                 Exit 1 của collect/audit là báo cáo chưa đạt, không bị đổi thành thành công.
-                Bài/người thiếu quota, nhãn sai, self-review hoặc pending đều chặn bàn giao.
+                Bài/người thiếu quota, nhãn sai hoặc self-review chặn bàn giao.
+                Pending/uncertain không được tính vào quota; vẫn có thể đạt audit nếu số nhãn accepted đủ.
                 Exit 2/dữ liệu thiếu làm cell dừng; sửa đường dẫn hoặc dữ liệu rồi chạy lại bước 3 với RUN_ID mới.
 
                 Chỉ có handoff.zip khi MODE=reviewed, ORIGIN=human và audit thật sự ready.
