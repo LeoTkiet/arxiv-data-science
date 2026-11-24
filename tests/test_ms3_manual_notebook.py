@@ -40,6 +40,8 @@ def test_runtime_is_reproducible_source_only_and_cells_have_no_results(tmp_path)
     assert hashlib.sha256(raw).hexdigest()==constants['RUNTIME_SHA256']
     with zipfile.ZipFile(io.BytesIO(raw)) as archive:
         names=archive.namelist()
+        assert all(info.create_system == 3 and info.external_attr >> 16 == 0o100644
+                   for info in archive.infolist())
         assert all(n.startswith('src/') or n in ['configs/ms3_manual_assignments.json','runtime_manifest.json'] for n in names)
         assert not any(n.endswith(('.xlsx','.csv','.env','.ipynb')) or n.startswith('artifacts/') for n in names)
         manifest=json.loads(archive.read('runtime_manifest.json'))
