@@ -46,9 +46,9 @@ def test_production_preserves_assigned_count_for_a_selected_subset(tmp_path, mon
     original = pipeline.load_with_provenance
     seen = []
 
-    def load(paper, config):
+    def load(paper, config, **kwargs):
         seen.append(config['population_count'])
-        return original(paper, config)
+        return original(paper, config, **kwargs)
 
     monkeypatch.setattr(pipeline, 'load_with_provenance', load)
     result = pipeline.run_matching(cfg, adapters=adapters)

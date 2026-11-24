@@ -24,18 +24,20 @@ def digest(value):
 class LoadedPublication:
     bundle: PublicationBundle
     provenance: dict
+    source_tables: dict | None = None
 
 
 class _NotReady(ValueError):
     pass
 
 
-def load_with_provenance(arxiv_id, context) -> LoadedPublication:
+def load_with_provenance(arxiv_id, context, *, include_export_tables=False) -> LoadedPublication:
     paper = canonical_id(arxiv_id)
     roots = {name: Path(context[f'{name}_root']).resolve() for name in ('ms1', 'ms2')}
     files = {}
     contents = {}
     snapshot = None
+    source_tables = None
 
     def read_bytes(source, relative):
         key = f'{source}/{relative}'
@@ -136,6 +138,19 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
         bibtex = artifact('ms2', dedup, 'bibtex')
         if not isinstance(bibtex, list) or not isinstance(refs, list):
             raise ContractError('BibTeX/references artifacts must be lists')
+        if include_export_tables:
+            metadata = artifact('ms1', checkpoint('ms1', 'metadata', '1.0', {'success'})['artifacts'], 'metadata')
+            if not isinstance(metadata, dict) or (metadata.get('schema_version'), metadata.get('arxiv_id')) != ('1.0', paper):
+                raise ContractError('M1 metadata identity/schema mismatch')
+            full = {}
+            for name in ('elements', 'hierarchy'):
+                if manifest.get('tables', {}).get(name) != dedup.get(name):
+                    raise ContractError(f'M2 {name} path disagrees with manifest')
+                full[name] = artifact('ms2', dedup, name)
+                if not isinstance(full[name], list):
+                    raise ContractError(f'M2 {name} artifact must be a list')
+            paper_row = {name: metadata[name] for name in
+                ('arxiv_id', 'title', 'authors', 'submission_date', 'revised_dates', 'venue')}
         bundle = publication_from_rows(paper, bibtex, refs, readiness='ready')
         extra = []
         for row in bundle.bibtex:
@@ -144,6 +159,8 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
                     extra.append(Issue(paper, 'match_input', f'missing_bibtex_{name}', 'warning',
                         f'BibTeX {name} is missing; preserved without fabrication', citation_key=row.citation_key))
         bundle = PublicationBundle(paper, bundle.bibtex, bundle.references, 'ready', bundle.issues + extra)
+        if include_export_tables:
+            source_tables = dict(papers=[paper_row], references=refs, bibtex=bibtex, **full)
     except (FileNotFoundError, _NotReady) as exc:
         bundle = PublicationBundle(paper, [], [], 'not_ready', [Issue(paper, 'match_input',
             'upstream_not_ready', 'error', str(exc))])
@@ -152,7 +169,7 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
             'invalid_snapshot', 'error', str(exc))])
     provenance = dict(files=files, input_fingerprint=digest(files), input_snapshot_id=snapshot,
                       synthetic=bool(context.get('fixture_mode', False)))
-    return LoadedPublication(bundle, provenance)
+    return LoadedPublication(bundle, provenance, source_tables)
 
 
 def load_publication(arxiv_id, context) -> PublicationBundle:
