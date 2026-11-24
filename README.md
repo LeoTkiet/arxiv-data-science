@@ -1,253 +1,119 @@
 # arxiv-data-science
 
-## TV5 — MS1 benchmark và báo cáo
+Pipeline xử lý corpus arXiv theo phiên bản (**Version-Aware arXiv Corpus Construction & Reference Matching**) cho đồ án môn *Introduction to Data Science* (HCMUS · Nhóm 6, 5 thành viên: TV1–TV5), bao gồm đầy đủ 3 cột mốc:
 
-Hướng dẫn đầy đủ, công thức và giới hạn phép đo tại [docs/TV5_MS1_GUIDE.md](docs/TV5_MS1_GUIDE.md). Module mới nằm trong `src/arxiv_pipeline/reporting/milestone1/`; không thay đổi phần MS2.
+- **Milestone 1 — Crawling:** Discovery mọi version từ arXiv API, tải và giải nén mã nguồn LaTeX (`.tex`/`.bib`, loại bỏ hình ảnh nhị phân), chuẩn hóa metadata và thu thập references từ Semantic Scholar API.
+- **Milestone 2 — Parsing:** Hợp nhất đường dẫn biên dịch LaTeX (`\input`/`\include`), dựng cây phân cấp phần tử, chuẩn hóa văn bản/công thức, hợp nhất BibTeX và khử trùng lặp đa phiên bản.
+- **Milestone 3 — Reference Matching & Final Dataset:** Snapshot loader, gán nhãn manual/heuristic, chia tập chống rò rỉ theo publication, trích xuất đặc trưng, huấn luyện/so sánh mô hình xếp hạng, đánh giá **MRR@5**, kiểm định 6 bảng và xuất **sharded Parquet** lên **Hugging Face Hub**.
 
-```powershell
-python -m pip install -e ".[reporting,dev]"
-python -m arxiv_pipeline.reporting.milestone1.benchmark --output data/ms1 --results artifacts/ms1-run -- --ids 2508.12872
-python -m arxiv_pipeline.reporting.milestone1.export --run artifacts/ms1-run --book ../arxiv-project-report --name local-smoke
-python -m pytest -q
+---
+
+## 1. Cấu trúc Repository
+
+```text
+arxiv-data-science/
+├── main.py                              # Entrypoint CLI (chạy trực tiếp không cần cài package)
+├── pyproject.toml                       # Khai báo package và extras [reporting,matching,export,dev]
+├── requirements.txt                     # Cài đặt đầy đủ môi trường tái lập
+├── configs/
+│   └── ms1_group6_ranges.json           # Dải 25.000 arXiv ID được giao cho nhóm 6
+├── colab/                               # Notebook Colab CPU-only cho MS1 & MS2
+├── docs/
+│   ├── CONTRACTS.md                     # Hợp đồng dữ liệu MS1 (schema 1.0)
+│   ├── MS2_CONTRACTS.md                 # Hợp đồng parsing MS2 (schema 2.0)
+│   ├── MS2_RESOLVER.md                  # Đặc tả LaTeX resolver
+│   ├── MS2_HANDOFF.md                   # Biên bản bàn giao MS2
+│   ├── MS3_CONTRACTS.md                 # Hợp đồng matching & export MS3 (schema 3.0)
+│   └── matching/
+│       ├── annotation_guideline.md      # Quy chuẩn gán nhãn thủ công & heuristic (TV3)
+│       ├── feature_dictionary.md        # Từ điển đặc trưng (TV2)
+│       └── feature_schema.json          # Schema đặc trưng cố định (TV2)
+├── poster/
+│   └── README.md                        # Đặc tả bàn giao metrics/export cho poster A2 portrait
+├── scripts/                             # Script hỗ trợ chạy pipeline & đồng bộ notebook
+├── src/arxiv_pipeline/
+│   ├── common/                          # Config, logger, schemas (1.0/2.0/3.0), canonical ID utils
+│   ├── crawling/                        # Discovery, downloader, extractor, metadata, Semantic Scholar
+│   ├── parsing/                         # Resolver, hierarchy, normalization, bibliography, deduplication
+│   ├── matching/
+│   │   ├── contracts.py                 # Typed records & validators MS3 (TV1)
+│   │   ├── io.py, state.py, pipeline.py, adapters.py, cli.py, smoke.py # Loader & orchestrator (TV1)
+│   │   ├── cleaning.py, candidates.py, features.py, baseline.py        # Features & baseline (TV2)
+│   │   ├── heuristics.py, labeling.py   # Gán nhãn heuristic, CSV/CLI gán nhãn tay & QA (TV3)
+│   │   ├── model.py, train.py, analysis.py # Mô hình xếp hạng & phân tích lỗi trên valid (TV4)
+│   │   ├── split.py                     # Chia train/valid/test theo publication & leakage guard (TV5)
+│   │   ├── metrics.py                   # MRR@5 chính thức, Recall@k, tie/duplicate/missing check (TV5)
+│   │   ├── prediction.py                # Xếp hạng Top-5 & dựng bảng predictions (TV5)
+│   │   ├── evaluation.py                # Đánh giá TV4 vs baseline TV2, slices & error taxonomy (TV5)
+│   │   └── export.py                    # Kiểm định 6 bảng, sharded Parquet & upload HF Hub (TV5)
+│   ├── export/                          # Validator MS1 (`validation.py`) & facade Parquet (`parquet.py`)
+│   ├── pipeline/                        # Orchestrator CLI cho MS1/MS2/MS3 với checkpoint/resume
+│   └── reporting/                       # Benchmark & audit tài nguyên cho MS1/MS2
+└── tests/                               # Unit & integration tests offline cho MS1–MS3
 ```
 
-Input assignment nhóm 6 ở `configs/ms1_group6_ranges.json` (25.000 ID lookup). Benchmark cuối cần Colab CPU-only; smoke local/demo không thay thế số đo nghiệm thu. Mỗi results mới, nằm ngoài output; `--resume` phải ghi nhãn điều kiện chạy. Repository Jupyter Book là thư mục/repo riêng `arxiv-project-report`.
+---
 
-Notebook chạy cho nhóm: [colab/MS1_Benchmark_CPU.ipynb](colab/MS1_Benchmark_CPU.ipynb). Hướng dẫn chọn phạm vi, resume, audit cá nhân/toàn nhóm và kiểm thử: [colab/README.md](colab/README.md). Notebook cố định source commit đã kiểm chứng, giữ kết quả các lượt trước và kiểm run ID/hash trước khi xuất lại thống kê. Workflow build/deploy báo cáo vẫn ở repo Jupyter Book.
+## 2. Thiết lập môi trường
 
-Phần bàn giao TV1: cấu trúc project MS1–MS3, Discovery mọi version, hợp đồng dữ liệu v1 và CLI điều phối có checkpoint/resume. Python **3.10+**, runtime TV1 chỉ dùng standard library.
+Yêu cầu **Python 3.10+**.
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-arxiv-pipeline --ids 2301.00001 2301.00002 --output data --stage discovery
+python -m pip install -e ".[dev,reporting,matching]"
 ```
 
-Có thể chạy ngay từ checkout, không cần cài package:
+Để truy vấn Semantic Scholar nhanh hơn khi chạy MS1, tạo tệp `.env` từ `.env.example` và đặt biến `S2_API_KEY` (không commit `.env`).
+
+---
+
+## 3. Hướng dẫn chạy từng Milestone
+
+### Milestone 1 — Crawling (Discovery, Source, Metadata, References, Validate)
 
 ```powershell
-python main.py --ids 2301.00001 --output data
-python main.py --input ids.txt --range 2301.00001:2301.00003 --output data --resume
-python scripts/run_pipeline.py --ids hep-th/9901001 --output data
-python main.py --ids 2301.00001 --output data --force
-```
+# Chạy discovery một hoặc nhiều bài
+python main.py --ids 2301.00001 2301.00002 --output data --stage discovery
 
-`ids.txt` dùng UTF-8, mỗi dòng một ID, cho phép dòng trống và comment `#`. `--ids` nhận ID phân cách bằng khoảng trắng hoặc dấu phẩy, URL abs/pdf, tiền tố `arXiv:` và version cụ thể. Range là khoảng đóng trong cùng tháng, tối đa 10.000 ID. Đầu vào version cụ thể vẫn phát hiện toàn bộ version của paper; version không tồn tại được ghi lỗi riêng. ID không hợp lệ không làm dừng các ID còn lại.
-
-`--resume` dùng lại discovery hoàn chỉnh và thử lại các input thất bại. `--force` cập nhật snapshot latest và chạy lại các adapter; không dùng cùng `--resume`. Mặc định không có resume thì chạy mới. `--timeout 30`, `--retries 3`, `--request-delay 3` là mặc định; retries không gồm lần đầu, delay tối thiểu 3 giây. Mỗi output root chỉ có một process ghi tại một thời điểm.
-
-Đầu ra chính là `manifests/discovery.json`, `manifests/stages.json`, `summary.json`, `state/` và `logs/pipeline.log` bên trong output root. Record `success` có đầy đủ v1..vn, metadata ngày từng version và đường dẫn source/corpus cố định. `invalid_id`, `not_found`, `api_error`, `data_error` được tách biệt. Không tải source bằng lệnh discovery.
-
-Hợp đồng cho **TV2–TV5**, schema, đường dẫn và giao diện adapter nằm ở [docs/CONTRACTS.md](docs/CONTRACTS.md). Đây là baseline TV1 để nhóm review; chưa có xác nhận của các thành viên. Các module chưa bàn giao có hàm `run(...)` ném `NotImplementedError` rõ ràng.
-
-```powershell
+# Chạy crawl đầy đủ với checkpoint/resume
 python main.py --input ids.txt --output data --stage crawl --resume
-```
 
-Lệnh crawl kết nối Discovery → download → extract, sau đó metadata → references → validate. Khi adapter chưa được bàn giao, manifest ghi `not_implemented`/`skipped`, exit 1. Không báo thành công toàn pipeline khi mới có Discovery. MS2/MS3 và Parquet là khung chờ triển khai.
-
-Kiểm thử offline (không gọi arXiv, không cần tải dependencies):
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-Tests bao gồm HTTP retry, lỗi Atom/data, ID cũ/mới, mọi version, CLI và resume sau lỗi/gián đoạn, tích hợp adapter giả lập. Live arXiv cần Internet; fixtures không chứng minh API đang khả dụng. Exit: 0 hoàn tất, 1 có lỗi/chưa bàn giao, 2 tham số sai, 130 bị ngắt. `no_source`, `not_indexed`, `no_data` là outcome riêng, không dùng để tính success rate của source.
-
-## Reference crawler (Semantic Scholar)
-
-Stage `references` lấy danh sách tham khảo của mỗi paper từ Semantic Scholar. Code ở `src/arxiv_pipeline/crawling/s2/`, adapter là `crawling/references.py`. 
-
-**Đặt key.** Tạo `.env` ở thư mục gốc repo (đã gitignore), theo mẫu `.env.example`:
-
-```text
-S2_API_KEY=your_semantic_scholar_key
-```
-
-Không có key vẫn chạy, nhưng dùng pool chung (giãn cách 5 giây, dễ bị 429). Biến `S2_API_KEY` đã export trong shell được ưu tiên hơn `.env`. Kiểm tra: đầu log có dòng `S2 API key loaded (...xxxx)`.
-
-**Chạy** Stage `references` chạy cùng pipeline, mỗi paper một request:
-
-```powershell
-python main.py --input ids.txt --output data --stage crawl --resume
-```
-
-Nhanh hơn khi có nhiều paper: lấy references trước theo batch (100 paper mỗi request), rồi pipeline bỏ qua stage này nhờ `--resume`. Chạy lần lượt, không chạy song song:
-
-```powershell
+# Lấy references Semantic Scholar theo batch trước khi chạy crawl --resume
 python -m arxiv_pipeline.crawling.s2.batch --input ids.txt --output data
-python main.py --input ids.txt --output data --stage crawl --resume
 ```
 
-Chạy lại cùng lệnh: paper đã xong được bỏ qua, paper lỗi được thử lại. Test: `python -m unittest tests.crawling.test_s2_references -v`.
+- Đầu ra nằm tách biệt trong `--output`: `manifests/`, `state/`, `raw/`, `corpus/`, `metadata/`, `references/`, `validation/`, `summary.json`.
+- Tôn trọng độ trễ tối thiểu 3 giây/request; không tải lại các stage terminal đã hoàn tất khi dùng `--resume`; dùng `--force` để chạy lại snapshot mới.
+- Validator MS1 nằm ở `src/arxiv_pipeline/export/validation.py`. Benchmark Colab CPU-only xem [colab/MS1_Benchmark_CPU.ipynb](colab/MS1_Benchmark_CPU.ipynb) và [colab/README.md](colab/README.md).
 
-**Schema đầu ra** (trong `--output`):
-
-| File | Nội dung |
-| --- | --- |
-| `references/<paper_key>.json` | Mảng reference, gồm cả reference không có arXiv ID |
-| `references/<paper_key>.provenance.json` | `source`, `retrieved_at`, `status`, `s2_paper_id`, `venue`, `reference_count`, `paginated` |
-| `state/stages/references/<paper_key>/paper.json` | `StageResult` dùng để resume |
-| `state/s2_progress.jsonl` | Mỗi lần thử một dòng: `arxiv_id`, `status`, `n_refs`, `paginated`, `seconds` |
-
-Một reference:
-
-```json
-{
-  "arxiv_id": "2508.12872",
-  "ref_arxiv_id": null,
-  "ref_title": "Example title",
-  "ref_authors": ["A. Author", "B. Author"],
-  "ref_submission_date": "2024-06-01",
-  "ref_s2_id": "dd1d030eb34bfef20bc56c37a3d2cd8f17cbc778",
-  "missing_fields": ["ref_arxiv_id"]
-}
-```
-
-- `ref_arxiv_id` chỉ lấy từ trường `ArXiv` của Semantic Scholar, không suy ra từ DOI. Trường scalar thiếu là `null`, danh sách thiếu là `[]`, và tên trường được ghi vào `missing_fields`.
-- `ref_submission_date` là `YYYY-MM-DD`, hoặc chỉ `YYYY` khi S2 chỉ có năm.
-- Reference trùng (cùng S2 ID, hoặc cùng arXiv ID khi không có S2 ID) chỉ giữ một lần. Mục rỗng bị bỏ.
-- Status: `success` (có reference), `no_data` (S2 có paper nhưng không có reference), `not_indexed` (S2 không biết paper), `api_error` (hết retry hoặc HTTP 400, không ghi file, thử lại ở lần chạy sau).
-
-
-## Metadata
-
-Stage `metadata` (`crawling/metadata.py`) không gọi mạng: nó kiểm tra record Discovery, chuẩn hoá và ghi `metadata/<paper_key>.json`. Cấp paper có đúng các cột bảng `papers` (`arxiv_id`, `title`, `authors`, `submission_date` từ v1, `revised_dates` từ v2..vn, `venue` từ `journal_ref`, có thể `null`) cùng `abstract`, `categories`, `doi`, `source`, `retrieved_at`. Mỗi phần tử của `versions[]` có metadata riêng của version đó (`title`, `authors`, `venue`, `submission_date`, `updated_date`). Giá trị thiếu là `null`/`[]` và được ghi trong `missing_fields`; không suy đoán. Record không hợp lệ cho `data_error`, không ghi file. Test: `python -m unittest tests.crawling.test_metadata -v`.
-
-## Validator (TV5)
-
-Stage `validate` đã được triển khai trong `src/arxiv_pipeline/export/validation.py` và tự chạy cuối mỗi paper khi dùng `--stage crawl`:
+### Milestone 2 — Parsing Offline
 
 ```powershell
-python main.py --input ids.txt --output data --stage crawl --resume
-python -m unittest discover -s tests -p test_validation.py -v
+python main.py --stage parse --ms1-input artifacts/ms1-snapshot --output artifacts/ms2 --resume
 ```
 
-Validator đọc checkpoint tại `state/stages/`, không phụ thuộc manifest tổng hợp vốn chỉ được ghi sau khi toàn pipeline kết thúc. Kiểm tra gồm danh sách version, artifact/đường dẫn, source/checksum SHA-256 nếu sidecar có ghi, corpus `.tex`/`.bib`, metadata so với Discovery và schema/reference trùng. Cho phép sidecar `extract_metadata.json`. Không sửa corpus hay gọi API.
+- Đọc snapshot MS1 bất biến, ghi ra thư mục MS2 tách biệt theo luồng: `Resolver → Hierarchy → Normalization` song song `Resolver → Bibliography`, sau đó `Deduplication → Validate Parse`.
+- Chi tiết schema 2.0 và envelope xem [docs/MS2_CONTRACTS.md](docs/MS2_CONTRACTS.md), [docs/MS2_HANDOFF.md](docs/MS2_HANDOFF.md) và [colab/MS2_Integration_CPU.ipynb](colab/MS2_Integration_CPU.ipynb).
 
-Kết quả là `validation/<paper_key>.json`: `valid`, `counts`, `outcomes`, `errors`, `warnings`, `duplicate_files`. Mỗi lỗi có paper ID, version nếu áp dụng, đường dẫn, mã lỗi và mô tả. Dữ liệu không hợp lệ trả `StageResult.status=data_error`; JSON chẩn đoán vẫn được lưu. `success` của validator chỉ có nghĩa kết quả nhất quán: `no_source`, `no_data`, `not_indexed` vẫn được giữ riêng; không được dùng `validate=success` để tính tỷ lệ tải source thành công. Source trùng nội dung là cảnh báo vì các version có thể dùng chung nội dung; references trùng định danh là lỗi.
+### Milestone 3 — Reference Matching, Evaluation & Parquet Export
 
-`--resume` có thể dùng lại validation đã thành công; nó không buộc kiểm tra lại nội dung. `--force` chạy lại cả pipeline và có thể tải lại dữ liệu. Để chỉ kiểm tra lại dữ liệu đã có, gọi adapter trực tiếp từ Python, tại repo root:
+Contract nhóm bản `3.0` nằm ở [docs/MS3_CONTRACTS.md](docs/MS3_CONTRACTS.md). Các module M3 dùng records/validators trong `arxiv_pipeline.matching.contracts`; `BibtexInput` dùng lại `BibtexRow` M2; checkpoint M3 truyền tường minh `schema_version=MATCHING_SCHEMA_VERSION`.
 
-```python
-import json
-import sys
-from pathlib import Path
+#### 3.1. TV1 — Loader, CLI và Orchestration (T1-02 đến T1-04)
 
-sys.path.insert(0, str(Path('src').resolve()))
-from arxiv_pipeline.export.validation import run
+Loader `matching/io.py` đọc snapshot M1/M2 ở chế độ chỉ đọc. Một publication chỉ `ready` khi references M1 có checkpoint/QA hợp lệ; M2 đã xử lý đủ version `1..N`, manifest complete, QA đúng snapshot và các artifact khớp hash checkpoint. Run toàn luồng đọc thêm checkpoint metadata MS1 và các bảng `elements`/`hierarchy` đã dedup của MS2 ngay khi tạo snapshot, giữ nguyên năm bảng nguồn cùng hash cho bước export.
 
-output = Path('data')
-records = json.loads((output / 'manifests/discovery.json').read_text(encoding='utf-8'))
-for record in records:
-    if record['status'] == 'success':
-        result = run(record, output)
-        print(result.paper_id, result.status, result.artifacts)
-```
-
-Sau một lần chạy bị gián đoạn, có thể đọc record từ `state/discovery/*.json` thay manifest. Gọi trực tiếp chỉ cập nhật báo cáo validation, không cập nhật checkpoint validate hay summary của orchestrator. Chạy kiểm tra sau khi tiến trình ghi corpus đã dừng. Benchmark tài nguyên và báo cáo Jupyter Book là các phần riêng, chưa nằm trong validator.
-
-Quy trình nhóm: tạo issue có người phụ trách, input/output và tiêu chí nghiệm thu; làm trên nhánh `feature/...` theo kế hoạch nhóm, PR có hướng dẫn test và ít nhất một reviewer, không commit trực tiếp main. Việc merge nhánh thành viên, tạo repository báo cáo và benchmark Colab thực hiện khi có module/quyền truy cập tương ứng.
-
-## Milestone 2 — điều phối parsing offline
-
-Parsing đọc một snapshot MS1 đã ghi xong, không gọi lại arXiv/Semantic Scholar.
-Input MS1 và output MS2 phải là hai thư mục tách rời; không chạy nhiều CLI ghi
-cùng output root và không dùng corpus đang có tiến trình khác cập nhật.
-
-```powershell
-python main.py --stage parse --ms1-input artifacts/ms1-snapshot --output artifacts/ms2 --ids 2310.12345 --resume
-```
-
-Bỏ `--ids` để chọn mọi record trong snapshot. Có thể dùng `--input ids.txt` hoặc
-`--range` để lọc paper như MS1; ID chọn parsing không có hậu tố version.
-`--versions 1 2` giới hạn các version được xử lý. Nếu chưa chọn đủ mọi version
-MS1 của một paper, pipeline ghi incomplete và không công bố bảng cấp paper.
-`--force` chạy lại các stage trong phạm vi đã chọn; không xóa kết quả paper khác
-hoặc ghi vào MS1. `--resume` và `--force` không dùng đồng thời.
-
-Luồng theo version: Resolver → Hierarchy → Normalization, cùng nhánh Resolver →
-Bibliography. Sau khi đủ các version: Deduplication → Validation MS2. Bibliography
-vẫn nhận version không có TeX để xử lý `.bib` nếu còn; version empty không bị
-loại khỏi mẫu số coverage. Discovery `not_found`/`invalid_id` được ghi riêng ở
-`excluded_inputs`, không tạo publication giả.
-
-Sáu module thật đã tích hợp trên `main`, gồm validator TV5 sau PR #19.
-Module thiếu vẫn trả `not_implemented` và làm lượt chạy incomplete. Tests gồm
-các ca điều phối bằng mock và các ca chạy đủ module thật bằng fixture offline.
-
-Đầu ra điều phối chính:
-
-- `parsing_summary.json`: complete, paper_results, stage_statuses, input_errors.
-- `manifests/parsing.json`, `manifests/stages.json`: kết quả của lượt chọn hiện tại.
-- `state/stages/<stage>/<paper_key>/<N|paper>.json`: StageResult schema 2.0.
-- File `.dependencies.json` đi kèm: fingerprint đầu vào/mã module/checkpoint và
-  hash artifact để kiểm tra resume; artifact thiếu, hỏng hoặc thay đổi phải chạy lại.
-- `state/parsing/<paper_key>.json`: tình trạng đầy đủ của từng paper. Bảng cuối
-  chỉ được xem là hoàn tất khi trạng thái pipeline này có complete=true.
-
-Version mới hoặc nội dung đầu vào thay đổi làm mất hiệu lực export/validation
-cấp paper. Nếu snapshot đổi giữa quá trình xử lý, pipeline không công bố complete.
-Export cũ bị đánh complete=false khi upstream hiện tại chưa đủ; dữ liệu không bị
-xóa. Validator MS1 ở `export/validation.py` giữ nguyên; adapter TV5 MS2 được nối
-qua `reporting/milestone2/validation.py`, stage `validate_parse`.
-
-Exit code parsing: `0` khi mọi publication đã chọn hoàn tất hoặc là empty hợp
-lệ, `1` khi lỗi/chưa bàn giao/chưa đủ version, `2` khi tham số CLI sai, `130` khi
-bị ngắt. Chi tiết envelope và artifact xem [hợp đồng MS2](docs/MS2_CONTRACTS.md).
-
-```powershell
-python -m pytest tests/pipeline/test_parse.py tests/pipeline/test_cli.py -q
-```
-
-Notebook [MS2 Integration CPU](colab/MS2_Integration_CPU.ipynb) chạy module thật,
-đo tài nguyên, kiểm tra resume và ghi bằng chứng theo từng thành viên. Chọn mẫu
-bằng danh sách ID; chỉ chạy mọi record khi đã có snapshot đầy đủ. Đối chiếu đúng
-ID được giao trước khi xác nhận toàn phạm vi, không chỉ so số lượng. Xem kết quả
-và giới hạn nghiệm thu trong [bàn giao MS2](docs/MS2_HANDOFF.md).
-
-## Milestone 3: data contracts 3.0
-
-Contract nhóm đã chốt nằm ở [docs/MS3_CONTRACTS.md](docs/MS3_CONTRACTS.md).
-Các module M3 dùng records/validators trong `arxiv_pipeline.matching.contracts`;
-`BibtexInput` dùng lại `BibtexRow` M2. Checkpoint M3 phải truyền tường minh
-`schema_version=MATCHING_SCHEMA_VERSION`; default M1/M2 giữ nguyên.
-
-[Compatibility fixtures](tests/fixtures/matching/README.md) có exact, ambiguous,
-unmatched, empty references và split mock cho nhóm 5 người. Không dùng dữ liệu
-synthetic làm bằng chứng nghiệm thu. Task này cung cấp schema/validators/fixtures;
-phần triển khai tiếp theo của loader và orchestration được mô tả bên dưới.
-
-```powershell
-python -m pytest tests/matching/test_contracts.py -q
-```
-
-### TV1: loader, CLI và orchestration (T1-02 đến T1-04)
-
-Loader `matching/io.py` đọc snapshot M1/M2 ở chế độ chỉ đọc. Một publication
-chỉ `ready` khi references M1 có checkpoint/QA hợp lệ; M2 đã xử lý đủ version,
-manifest complete, QA đúng snapshot và các artifact khớp hash checkpoint.
-Thiếu checkpoint/API lỗi khác với references rỗng đã được xác nhận.
-`load_publication(arxiv_id, context)` trả `PublicationBundle`;
-`load_with_provenance` trả thêm inventory SHA-256 và danh tính snapshot.
-References không có arXiv ID được ghi issue và giữ nguyên ở nguồn.
-
-Chạy smoke offline, dùng các adapter **synthetic** cho mọi bước:
+Chạy smoke offline (dùng các adapter **synthetic** — không phải số đo thực nghiệm):
 
 ```powershell
 python main.py matching smoke --output artifacts/ms3-smoke
 python main.py matching smoke --output artifacts/ms3-smoke --resume
 ```
 
-Lệnh tạo snapshot giả lập riêng ở thư mục `ms3-smoke-fixture-input` cùng cấp
-với output. Không ghi đè fixture đã có khi resume. Kết quả smoke và sáu tệp
-JSON export đều đánh dấu synthetic; chúng không phải nhãn thật, số đo ML,
-Parquet hoặc bằng chứng đạt quota. Sau `pip install -e ".[dev,reporting,matching]"`,
-cũng có thể gọi `matching smoke ...` hoặc `arxiv-pipeline matching smoke ...`.
+Sau khi cài `pip install -e ".[dev,reporting,matching]"`, có thể gọi trực tiếp `matching smoke ...` hoặc `arxiv-pipeline matching smoke ...`.
 
-Để chạy trên dữ liệu thật, chuẩn bị config JSON; đường dẫn tương đối được
-hiểu từ thư mục chứa config:
+Chạy production trên dữ liệu thật với config JSON (đường dẫn tương đối tính từ thư mục chứa config; bắt buộc khai báo `population_count` theo phạm vi thực được giao):
 
 ```json
 {
@@ -265,81 +131,92 @@ hiểu từ thư mục chứa config:
 python main.py matching run --input matching-config.json --output artifacts/ms3 --resume
 ```
 
-`labels.json` chứa danh sách `LabelRecord`; `partitions.json` là
-`PartitionManifest` theo contract 3.0. Bỏ `partitions` để dùng module split
-của TV5 khi được bàn giao. Population count lấy từ phạm vi thực được giao;
-không thu nhỏ theo số bài đã parse. Production bắt buộc khai báo
-`population_count` trong JSON hoặc `--population-count`; giá trị phải là số
-nguyên dương không nhỏ hơn số ID được chọn. Thiếu/sai giá trị sẽ báo lỗi cấu
-hình trước khi đọc snapshot hoặc ghi output; không tự lấy `len(ids)` làm mẫu số.
-Nếu không dùng nhãn ngoài, phải chọn
-`--auto-label` tường minh và có module heuristic TV3. `uncertain/pending`
-không được dùng làm targets. Gán nhãn thủ công vẫn do thành viên thực hiện.
+- Bỏ `partitions` trong config để dùng `split.create_split` của TV5.
+- Luồng xử lý: `load → clean/labels theo publication → split toàn tập → features theo publication → train (train/valid) → score → rank → evaluate → export`.
+- Binding TV1 trong `matching/adapters.py` nối trực tiếp API TV5: `split.create_split`, `prediction.build_predictions(bundles, None, scores, labels, partition_manifest)`, `evaluation.evaluate` (giữ trọn `report` TV5 cùng `mrr_at_5` và `queries`) và `export.export_dataset` (ghi 6 bảng tại `dataset/data/<table>/`, `dataset/export_manifest.json`, `dataset/README.md` và khai báo mọi shard để kiểm hash khi `--resume`).
+- `matching run` chỉ xuất local; publication lên Hugging Face Hub là bước riêng của TV5 sau khi kiểm định dữ liệu thật.
 
-Luồng xử lý: load → clean/labels theo publication → split toàn tập → features
-theo publication → train bằng train/valid → score → rank → evaluate → export.
-Chỉ các phép features cố định, không học tham số, được nối bằng adapter TV2
-hiện tại; transformer học từ dữ liệu phải được fit trên train theo contract.
-Test labels không được chuyển vào adapter huấn luyện.
+#### 3.2. TV3 — Giao thức gán nhãn (Labeling Protocol)
 
-Nếu TV5 chưa bàn giao `prediction.build_predictions`, bước rank dùng
-`baseline.rank_top5_predictions` của TV2 với score đã có từ bước score, truyền
-`manifest` và `labels` theo tên tham số. Không tính lại score bằng baseline.
-Payload rank ghi tên hàm đã dùng; lỗi import/thực thi của API TV5 đã bàn giao
-vẫn làm stage thất bại. Split, evaluate và export chưa bàn giao vẫn báo lỗi.
+Chi tiết tại [docs/matching/annotation_guideline.md](docs/matching/annotation_guideline.md):
 
-Binding TV1 dùng API TV5: `split.create_split`,
-`prediction.build_predictions(bundles, None, scores, labels, partition_manifest)`,
-`evaluation.evaluate` và `export.export_dataset`. Snapshot nhãn được truyền
-bằng keyword `label_snapshot_id`; split kiểm quota trên population được giao,
-đủ nhãn manual và coverage auto. Report TV5 được giữ trong `report`,
-cùng `mrr_at_5` và số query supervised để pipeline kiểm tra.
+- **Phạm vi đối chiếu:** Chỉ ghép cặp trong cùng một publication `(arxiv_id, citation_key) ↔ ref_arxiv_id`.
+- **3 quyết định (`decision`):** `matched` (`groundtruth_arxiv_id != null`), `unmatched` (`null`), và `uncertain` (`null`, cần review chéo — không đưa vào supervised train/eval).
+- **Trạng thái duyệt (`review_status`):** Chỉ nhãn có `review_status="accepted"` và `decision != "uncertain"` (`LabelRecord.is_supervised == True`) mới tham gia huấn luyện và tính MRR@5.
+- **Định mức nhóm 5 người (`k = 5`):**
+  - **Manual pool (Gold):** ≥ 25 publications (mỗi thành viên ≥ 5 publications), mỗi bài ≥ 20 BibTeX entries đã gán nhãn → tổng ≥ 500 entries.
+  - **Automatic pool (Silver):** ≥ `max(ceil(0.1 × (N − M)), 10)` publications ngoài manual pool; gán nhãn 100% BibTeX entries của các bài được chọn và kiểm định bằng spot-check audit.
+- Công cụ gán nhãn tay: `export_annotation_sheet`, `run_interactive_cli`, `load_annotation_sheet`, `audit_label_manifest` trong `src/arxiv_pipeline/matching/labeling.py`.
 
-Run toàn luồng đọc thêm checkpoint metadata MS1 và các bảng elements/hierarchy
-đã dedup của MS2 ngay khi tạo snapshot. Năm bảng nguồn cùng hash được giữ cho
-export, không đọc lại một snapshot khác ở cuối lượt chạy. API loader publication
-độc lập vẫn hỗ trợ đầu vào tối thiểu BibTeX/references.
+#### 3.3. TV2 & TV4 — Đặc trưng, Baseline & Mô hình
 
-Export ghi sáu bảng tại `dataset/data/<table>/`, manifest và dataset card trong
-`dataset/`. Mọi shard và sidecar đều được khai báo để checkpoint hash/kiểm tra
-khi resume. References không có arXiv ID được lọc qua API TV5 cho bản xuất;
-dữ liệu nguồn giữ nguyên. `matching run` chỉ xuất local; publication lên Hub
-là bước riêng của TV5. Chế độ fixture tiếp tục đánh dấu export synthetic.
-
-Loader giữ quy ước MS2: đủ version `1..N` khớp parsing state, manifest và QA.
-Version không có source vẫn giữ trong manifest với trạng thái `no_source`.
-Danh sách khuyết như `[2]` hoặc `[1, 3]` chưa đáp ứng contract MS2 hiện tại;
-không tự bỏ version để nhận snapshot đó là complete. Lỗi của bài được ghi riêng,
-các bài khác vẫn được kiểm tra; run có lỗi chặn giữ `complete=false`.
-
-Các module chưa bàn giao trả `not_implemented`, run có `complete=false` và
-exit code `1`. Không tự chuyển sang mock trong chế độ production. Bản tích hợp
-cần các module TV5 đã bàn giao và dữ liệu/nhãn thật để nghiệm thu. Một publication
-lỗi vẫn giữ kết quả của các bài khác,
-nhưng chặn train/export của lượt tích hợp để không âm thầm đổi tập đánh giá.
-
-`manifests/run.json` ghi schema 3.0, source version (`-dirty` nếu chưa commit),
-run ID, snapshot IDs, label/split/schema IDs và complete. Artifact từng stage
-nằm ở `matching/<stage>/<paper_key|_run>/result.json`; checkpoints có inventory
-SHA-256 ở `state/stages/<stage>/<paper_key|_run>/paper.json`. Checkpoint reuse
-giữ `origin_run_id` và ghi run hiện tại riêng. Chỉ cache stage success khi
-input/config/code/dependencies và mọi artifact còn khớp. Snapshot hoặc file
-labels/split đổi trong lúc chạy làm lượt chạy incomplete. Không chạy đồng thời
-nhiều tiến trình ghi cùng output root. `--force` và `--resume` loại trừ nhau.
-
-TV2–TV5 có thể nối adapter `(context, output_root) -> dict` hoặc `StageOutput`:
-payload JSON được framework ghi atomic; model/export phải khai báo thêm mọi
-tệp binary để framework hash. Các binding nghiệp vụ nằm ở
-`matching/adapters.py`; loader/orchestrator không sửa schema dùng chung hoặc
-thay thuật toán của thành viên khác. CI chạy tests toàn repo và smoke/resume.
-
-Kiểm chứng loader local ngày 17/11/2026 trên `2410.08024`: 117 BibTeX,
-81 references M1 gốc, 36 candidates có arXiv ID; mọi hash đầu vào giữ nguyên.
-Receipt ở `artifacts/ms3-tv1-real-20261117/integration-receipt.json` (artifact
-local, không commit dữ liệu). Đây là nghiệm thu loader một publication, chưa
-phải kết quả train/evaluation MS3. Adapter TV4 thật cũng được kiểm thử trên
-fixtures, gồm chặn test labels và khôi phục model hỏng khi resume.
+- **Đặc trưng cặp (`cleaning.py`, `candidates.py`, `features.py`, `baseline.py`):** 4 nhóm đặc trưng (`title`, `author`, `identifier`, `temporal`, xem [docs/matching/feature_dictionary.md](docs/matching/feature_dictionary.md) và [docs/matching/feature_schema.json](docs/matching/feature_schema.json)); mọi transformer học từ dữ liệu chỉ `fit` trên tập **train**. Các cột định danh và metadata nhãn bị chặn tuyệt đối ở tầng contract.
+- **Mô hình (`model.py`, `train.py`, `analysis.py`):** Hỗ trợ `logreg`, `rf`, `hgb`, `lambdamart`; negative sampling chỉ áp dụng trên `train`; chọn siêu tham số và mô hình tốt nhất chỉ dựa trên **Validation MRR@5**; tập `test` bị khóa hoàn toàn cho tới bước đánh giá cuối của TV5.
 
 ```powershell
+python -m arxiv_pipeline.matching.train --mock --out artifacts/ms3_mock
+python -m arxiv_pipeline.matching.analysis --mock
+```
+
+#### 3.4. TV5 — Chia tập, Đánh giá MRR@5 & Xuất Sharded Parquet
+
+1. **Chia tập theo publication (`matching/split.py`):**
+   - `create_split(label_manifest, population_manifest, *, seed=42, group_size=5) -> PartitionManifest`
+   - Validation: `5 manual + 5 auto`; Test: `5 manual + 5 auto`; Train: phần còn lại.
+   - `assert_no_split_leakage(...)` kiểm chứng tập ID rời nhau hoàn toàn giữa `train`/`valid`/`test` và `manual`/`auto`, khớp `label_source`, chống rò rỉ feature/prediction.
+2. **Xếp hạng Top-5 & MRR@5 (`matching/prediction.py`, `matching/metrics.py`):**
+   - `build_predictions(queries, candidates, scores, labels, partition_manifest) -> list[RankedPrediction]`
+   - Sắp điểm giảm dần; hòa điểm phá bằng `ref_arxiv_id` canonical tăng dần; điền `None` ở cuối khi có ít hơn 5 candidates (giữ nguyên cả query có 0 references).
+   - **Quy ước MRR@5 chính thức:**
+     $$\text{MRR@5} = \frac{1}{|Q|} \sum_{q \in Q} \text{RR@5}(q), \qquad \text{RR@5}(q) = \begin{cases} 1/r & \text{nếu đáp án ở hạng } r \le 5 \\ 0 & \text{nếu miss hoặc } \texttt{unmatched} \end{cases}$$
+     Mọi query đã gán nhãn hợp lệ (`matched` và `unmatched`, kể cả 0-candidate) đều nằm trong mẫu số `|Q|`. Report luôn ghi rõ `unmatched_policy="include_zero_in_denominator"` kèm chỉ số chẩn đoán bổ sung (`mrr_at_5_matched_only`, `recall_at_1/3/5`).
+3. **Đánh giá TV4 vs Baseline TV2 (`matching/evaluation.py`):**
+   - `evaluate(...)` và `evaluate_scores(bundles, scores, labels, partition_manifest, *, partition="test", baseline_scores=...)` tạo báo cáo JSON (`allow_nan=False`) gồm metrics, `prediction_preview`, `slices`, `confusion_and_errors` và delta so sánh với baseline.
+4. **Kiểm định 6 bảng, Sharded Parquet & Hugging Face Hub (`matching/export.py`):**
+   - `prepare_published_references(raw_refs)` lọc giữ các reference có `ref_arxiv_id != null` theo đúng quy định xuất bản MS1/MS3.
+   - `export_hf_dataset(tables, paths, ...)` / `export_dataset(...)` kiểm định toàn bộ khóa chính, khóa ngoại liên bảng, **đủ mọi publication thuộc `PartitionManifest`** trong `papers`, `bibtex` và `predictions`, kiểu dữ liệu, dictionary encoding và tính toàn vẹn partition; ghi sharded Parquet nguyên tử; tự động đọc ngược (`verify_parquet_export`) kiểm tra schema, tổng số hàng và SHA-256; sinh `export_manifest.json` và `README.md` dataset card YAML chuẩn Hugging Face (`data/<table>/*.parquet`, không dùng loading script tùy chỉnh).
+   - `upload_to_hf(...)` **chặn cứng** mọi nỗ lực upload dữ liệu `synthetic=True` hoặc chưa qua read-back verification, đồng thời dùng `delete_patterns` để xóa shard cũ trên remote khi cập nhật snapshot mới và xác minh không còn shard dư thừa qua `verify_hf_repo_visibility(...)`.
+
+---
+
+## 4. Schema 6 bảng công bố trên Hugging Face
+
+| Bảng | Cột và kiểu Arrow | Ghi chú khóa & ràng buộc |
+| --- | --- | --- |
+| `papers` | `arxiv_id: string`, `title: string`, `authors: list<string>`, `submission_date: string`, `revised_dates: list<string>`, `venue: string (nullable)` | PK: `arxiv_id` |
+| `references` | `arxiv_id: string`, `ref_arxiv_id: string`, `ref_title: string (nullable)`, `ref_authors: list<string>`, `ref_submission_date: string (nullable)`, `ref_s2_id: string (nullable)` | PK: `(arxiv_id, ref_arxiv_id)`, FK → `papers`; chỉ giữ reference có arXiv ID |
+| `elements` | `element_id: string`, `arxiv_id: string`, `kind: dictionary<int8, string>`, `content: string` | PK: `element_id`, FK → `papers`; đã dedup xuyên phiên bản |
+| `hierarchy` | `arxiv_id: string`, `version: int64`, `element_id: string`, `parent_id: string` | Unique: `(arxiv_id, version, element_id)`, FK → `papers` & `elements` (cùng `arxiv_id`) |
+| `bibtex` | `arxiv_id: string`, `citation_key: string`, `entry_type: dictionary<int8, string>`, `title: string`, `authors: list<string>`, `year: int64 (nullable)`, `doi: string (nullable)`, `journal: string (nullable)`, `url: string (nullable)` | PK: `(arxiv_id, citation_key)`, FK → `papers` |
+| `predictions` | `arxiv_id: string`, `partition: dictionary<int8, string>`, `citation_key: string`, `groundtruth_arxiv_id: string (nullable)`, `cand_1..cand_5: string (nullable)` | PK: `(arxiv_id, citation_key)`, FK → `bibtex` & `references`; chỉ chứa các bài thuộc `train`/`valid`/`test` |
+
+Cấu trúc repository dataset trên Hugging Face:
+
+```text
+<dataset-repo>/
+├── README.md
+└── data/
+    ├── papers/part-*.parquet
+    ├── references/part-*.parquet
+    ├── elements/part-*.parquet
+    ├── hierarchy/part-*.parquet
+    ├── bibtex/part-*.parquet
+    └── predictions/part-*.parquet
+```
+
+---
+
+## 5. Kiểm thử
+
+Toàn bộ test chạy offline, không gọi mạng hay ghi đè dữ liệu thật:
+
+```powershell
+# Chạy toàn bộ bộ test Milestone 3 (TV1–TV5 & tích hợp native TV1–TV5)
 python -m pytest tests/matching tests/pipeline/test_cli.py -q
+
+# Chạy riêng bộ test TV5 (split, MRR@5, predictions, evaluation, 6-table Parquet & HF guards)
+python -m pytest tests/matching/test_evaluation.py tests/matching/test_export.py tests/matching/test_tv5_integration.py -v
+
+# Chạy toàn bộ test suite (MS1 + MS2 + MS3)
+python -m pytest -q
 ```
