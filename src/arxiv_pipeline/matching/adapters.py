@@ -94,10 +94,20 @@ def score(ctx, output):
 
 def rank(ctx, output):
     from arxiv_pipeline.matching.contracts import ScoreRecord
-    function = _function('prediction', 'build_predictions')
-    rows = function(ctx['split_bundles'], [ScoreRecord(**r) for r in ctx['score']['scores']],
-                    ctx['labels'], ctx['partition_manifest'])
-    return {'predictions': [asdict(r) for r in rows]}
+    scores = [ScoreRecord(**r) for r in ctx['score']['scores']]
+    # Only an absent TV5 API permits reuse of TV2's deterministic ranker.
+    # Import/runtime failures in a delivered provider must remain visible.
+    prediction = importlib.import_module('arxiv_pipeline.matching.prediction')
+    if hasattr(prediction, 'build_predictions'):
+        rows = prediction.build_predictions(ctx['split_bundles'], scores,
+                                            ctx['labels'], ctx['partition_manifest'])
+        ranker = 'prediction.build_predictions'
+    else:
+        function = _function('baseline', 'rank_top5_predictions')
+        rows = function(ctx['split_bundles'], scores, manifest=ctx['partition_manifest'],
+                        labels=ctx['labels'])
+        ranker = 'baseline.rank_top5_predictions'
+    return {'predictions': [asdict(r) for r in rows], 'ranker': ranker}
 
 
 def evaluate(ctx, output):

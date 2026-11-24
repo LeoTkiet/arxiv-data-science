@@ -55,6 +55,41 @@ def test_loader_requires_an_implemented_boundary(tmp_path):
     assert callable(getattr(io, 'load_publication', None)), 'T1-02 loader is missing'
 
 
+def _set_versions(ctx, expected, statuses=None):
+    root = ctx['ms2_root']
+    paper = '2310.12345'
+    path = root / f'tables/{paper}/parsing_manifest.json'
+    data = json.loads(path.read_text())
+    data['expected_versions'] = expected
+    data['versions'] = [dict(version=v, status=s) for v, s in
+                        zip(expected, statuses or ['success'] * len(expected))]
+    atomic_json(path, data)
+    _checkpoint(root, 'deduplicate', paper, dict(bibtex=f'tables/{paper}/bibtex.json',
+                parsing_manifest=f'tables/{paper}/parsing_manifest.json'))
+    atomic_json(root / f'state/parsing/{paper}.json', dict(arxiv_id=paper, complete=True,
+                expected_versions=expected, selected_versions=expected))
+
+
+@pytest.mark.parametrize('expected', [[2], [1, 3], [], [1, 1], [True], [0], [2, 1]])
+def test_sparse_or_malformed_versions_cannot_claim_ms2_complete(tmp_path, expected):
+    from arxiv_pipeline.matching.io import load_publication
+    ctx = ready_snapshot(tmp_path)
+    _set_versions(ctx, expected)
+    bundle = load_publication('2310.12345', ctx)
+    assert bundle.readiness == 'invalid'
+    assert any('MS1 discovery' in i.message for i in bundle.issues)
+    assert load_publication('2310.12346', ctx).readiness == 'ready'
+
+
+def test_contiguous_versions_with_no_source_are_ready(tmp_path):
+    from arxiv_pipeline.matching.io import load_publication
+    ctx = ready_snapshot(tmp_path)
+    _set_versions(ctx, [1, 2, 3], ['success', 'no_source', 'success'])
+    bundle = load_publication('2310.12345', ctx)
+    assert bundle.readiness == 'ready'
+    assert bundle.bibtex and bundle.references
+
+
 def test_ready_and_empty_candidates_preserved_without_source_writes(tmp_path):
     from arxiv_pipeline.matching.io import load_with_provenance
     ctx = ready_snapshot(tmp_path)

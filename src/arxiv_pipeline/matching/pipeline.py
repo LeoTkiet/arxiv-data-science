@@ -232,7 +232,8 @@ class _Runner:
 def run_matching(config, *, adapters=None):
     """Execute a selected dataset. Unknown/unavailable stages make it incomplete.
 
-    Required config: ms1_root, ms2_root, output, ids. Optional labels/partitions
+    Required config: ms1_root, ms2_root, output, ids; production also requires
+    population_count from the assigned population. Optional labels/partitions
     are file paths. Adapters are explicit callables (context, output_root).
     Only fixture_mode permits synthetic adapters/data and reduced split quotas.
     """
@@ -252,6 +253,11 @@ def run_matching(config, *, adapters=None):
     if not ids or len(ids) != len(set(ids)):
         raise ContractError('Select a nonempty list of unique canonical publication IDs')
     config['ids'] = sorted(ids)
+    if not config.get('fixture_mode'):
+        count = config.get('population_count')
+        if type(count) is not int or count < len(ids):
+            raise ContractError('population_count must be an integer from the assigned population '
+                                'covering all selected IDs; set it in JSON or --population-count')
     output = roots[2]
     # Check every write destination before the first mkdir/manifest update.
     for path in ('manifests/run.json', 'state/stages/probe/_run/paper.json', 'matching/probe/result.json', 'publications/probe/input_manifest.json', 'models/probe/model.joblib'):

@@ -117,7 +117,8 @@ def load_with_provenance(arxiv_id, context) -> LoadedPublication:
         if (not isinstance(expected, list) or not expected
                 or any(type(v) is not int for v in expected)
                 or expected != list(range(1, len(expected) + 1))):
-            raise ContractError('M2 versions must cover contiguous 1..N')
+            raise ContractError('M2 versions must cover contiguous 1..N from MS1 discovery; '
+                                'unavailable source must retain its version with no_source status')
         versions = manifest.get('versions')
         if (not isinstance(versions, list) or any(not isinstance(v, dict) for v in versions)
                 or [v.get('version') for v in versions] != expected

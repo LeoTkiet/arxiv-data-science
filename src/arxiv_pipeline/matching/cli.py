@@ -20,7 +20,8 @@ def main(argv=None):
             p.add_argument('--input', required=True, type=Path, help='JSON config with snapshot roots and publication IDs')
             p.add_argument('--labels', type=Path)
             p.add_argument('--partitions', type=Path)
-            p.add_argument('--population-count', type=int)
+            p.add_argument('--population-count', type=int,
+                           help='Assigned population size; required in production unless set in JSON')
             p.add_argument('--auto-label', action='store_true')
             p.add_argument('--fixture', action='store_true', help='Explicitly use synthetic business adapters; never experimental results')
     args = parser.parse_args(argv)

@@ -20,6 +20,43 @@ def test_pipeline_seam_exists():
     assert callable(getattr(pipeline, 'run_matching', None)), 'T1-04 runner is missing'
 
 
+@pytest.mark.parametrize('count', ['missing', None, True, 0, 2, '5000'])
+def test_production_population_count_fails_before_loading_or_writing(tmp_path, monkeypatch, count):
+    from arxiv_pipeline.matching import pipeline
+    from arxiv_pipeline.matching.contracts import ContractError
+    cfg, adapters = setup_run(tmp_path)
+    cfg['fixture_mode'] = False
+    cfg.pop('population_count')
+    if count != 'missing':
+        cfg['population_count'] = count
+
+    def forbidden_load(*args):
+        pytest.fail('Invalid population must be rejected before reading snapshots')
+
+    monkeypatch.setattr(pipeline, 'load_with_provenance', forbidden_load)
+    with pytest.raises(ContractError, match='population_count.*assigned population'):
+        pipeline.run_matching(cfg, adapters=adapters)
+    assert not cfg['output'].exists()
+
+
+def test_production_preserves_assigned_count_for_a_selected_subset(tmp_path, monkeypatch):
+    from arxiv_pipeline.matching import pipeline
+    cfg, adapters = setup_run(tmp_path)
+    cfg.update(fixture_mode=False, population_count=5000)
+    original = pipeline.load_with_provenance
+    seen = []
+
+    def load(paper, config):
+        seen.append(config['population_count'])
+        return original(paper, config)
+
+    monkeypatch.setattr(pipeline, 'load_with_provenance', load)
+    result = pipeline.run_matching(cfg, adapters=adapters)
+    assert seen == [5000] * len(cfg['ids'])
+    assert cfg['population_count'] == 5000
+    assert not result['complete']  # Synthetic snapshots remain forbidden.
+
+
 def test_mock_end_to_end_and_resume_has_origin_and_hashes(tmp_path):
     from arxiv_pipeline.matching.pipeline import run_matching
     cfg, adapters = setup_run(tmp_path)
@@ -31,6 +68,20 @@ def test_mock_end_to_end_and_resume_has_origin_and_hashes(tmp_path):
     assert second['run_id'] != first['run_id']
     assert all(s['origin_run_id'] == first['run_id'] for s in second['stages'])
     assert all(s['artifacts'] for s in second['stages'])
+
+
+def test_native_ranking_can_resume_without_tv5_prediction_api(tmp_path, monkeypatch):
+    from arxiv_pipeline.matching import adapters as native, prediction
+    from arxiv_pipeline.matching.pipeline import run_matching
+    monkeypatch.delattr(prediction, 'build_predictions', raising=False)
+    cfg, adapters = setup_run(tmp_path)
+    adapters['rank'] = native.rank
+    first = run_matching(cfg, adapters=adapters)
+    assert first['complete']
+    payload = json.loads((cfg['output'] / 'matching/rank/_run/result.json').read_text())
+    assert payload['ranker'] == 'baseline.rank_top5_predictions'
+    second = run_matching(dict(cfg, resume=True), adapters=adapters)
+    assert second['complete'] and all(s['cached'] for s in second['stages'])
 
 
 def test_pipeline_keeps_no_data_queries_without_declared_references(tmp_path):

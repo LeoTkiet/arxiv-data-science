@@ -49,6 +49,10 @@ Hợp đồng này chưa chứng minh corpus thật đã sẵn sàng.
 - Snapshot đầu vào phải bất biến trong lúc chạy; M3 ghi sang output root riêng.
 - Một publication chỉ đưa vào matching một lần sau khi M2 hợp nhất các version.
   Không thêm version vào khóa query để lặp lại entries đã dedup.
+  Theo producer MS2 hiện tại, `expected_versions` phải đủ `1..N` và khớp
+  parsing state/manifest/QA. Version không có source giữ trạng thái `no_source`,
+  không xóa khỏi danh sách. Nới quy tắc này cần đổi contract producer/consumer
+  và bằng chứng discovery tương ứng; M3 không tự nhận snapshot khuyết là complete.
 - `papers`, `elements`, `hierarchy` giữ schema M1/M2; M3 đọc thêm nếu cần,
   không sửa dữ liệu nguồn. Xem [MS2_CONTRACTS.md](MS2_CONTRACTS.md).
 
@@ -213,6 +217,12 @@ Sắp score giảm dần; hòa score thì ref_arxiv_id tăng dần theo chuỗi 
 Mỗi candidate xuất hiện một lần, thuộc cùng publication; điền null phía cuối
 khi có ít hơn năm references. Thiếu score của pair dự kiến, duplicate score
 hoặc score không hữu hạn là lỗi, không thay bằng 0.
+
+Binding TV1 ưu tiên `prediction.build_predictions` của TV5. Khi API này chưa
+có, dùng `baseline.rank_top5_predictions(bundles, scores, manifest=..., labels=...)`
+của TV2 để xếp hạng chính score đã được kiểm tra, không thay bằng heuristic score.
+Payload rank ghi hàm đã dùng. Lỗi import hoặc thực thi của API TV5 đã có không
+kích hoạt fallback; evaluate/export vẫn cần phần bàn giao của TV5.
 
 MRR@5 tính theo query test đã gán nhãn; no-hit và unmatched nhận 0, vẫn nằm
 trong mẫu số. Tập query rỗng báo lỗi, không công bố MRR=0 cho tập test rỗng.

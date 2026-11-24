@@ -268,7 +268,11 @@ python main.py matching run --input matching-config.json --output artifacts/ms3 
 `labels.json` chứa danh sách `LabelRecord`; `partitions.json` là
 `PartitionManifest` theo contract 3.0. Bỏ `partitions` để dùng module split
 của TV5 khi được bàn giao. Population count lấy từ phạm vi thực được giao;
-không thu nhỏ theo số bài đã parse. Nếu không dùng nhãn ngoài, phải chọn
+không thu nhỏ theo số bài đã parse. Production bắt buộc khai báo
+`population_count` trong JSON hoặc `--population-count`; giá trị phải là số
+nguyên dương không nhỏ hơn số ID được chọn. Thiếu/sai giá trị sẽ báo lỗi cấu
+hình trước khi đọc snapshot hoặc ghi output; không tự lấy `len(ids)` làm mẫu số.
+Nếu không dùng nhãn ngoài, phải chọn
 `--auto-label` tường minh và có module heuristic TV3. `uncertain/pending`
 không được dùng làm targets. Gán nhãn thủ công vẫn do thành viên thực hiện.
 
@@ -277,6 +281,18 @@ theo publication → train bằng train/valid → score → rank → evaluate �
 Chỉ các phép features cố định, không học tham số, được nối bằng adapter TV2
 hiện tại; transformer học từ dữ liệu phải được fit trên train theo contract.
 Test labels không được chuyển vào adapter huấn luyện.
+
+Nếu TV5 chưa bàn giao `prediction.build_predictions`, bước rank dùng
+`baseline.rank_top5_predictions` của TV2 với score đã có từ bước score, truyền
+`manifest` và `labels` theo tên tham số. Không tính lại score bằng baseline.
+Payload rank ghi tên hàm đã dùng; lỗi import/thực thi của API TV5 đã bàn giao
+vẫn làm stage thất bại. Split, evaluate và export chưa bàn giao vẫn báo lỗi.
+
+Loader giữ quy ước MS2: đủ version `1..N` khớp parsing state, manifest và QA.
+Version không có source vẫn giữ trong manifest với trạng thái `no_source`.
+Danh sách khuyết như `[2]` hoặc `[1, 3]` chưa đáp ứng contract MS2 hiện tại;
+không tự bỏ version để nhận snapshot đó là complete. Lỗi của bài được ghi riêng,
+các bài khác vẫn được kiểm tra; run có lỗi chặn giữ `complete=false`.
 
 Các module chưa bàn giao trả `not_implemented`, run có `complete=false` và
 exit code `1`. Không tự chuyển sang mock trong chế độ production. Hiện loader

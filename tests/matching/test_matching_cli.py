@@ -33,10 +33,41 @@ def test_cli_rejects_fixture_without_explicit_flag(tmp_path):
 def test_cli_real_mode_missing_upstream_returns_incomplete(tmp_path):
     from arxiv_pipeline.matching.cli import main
     path = tmp_path / 'config.json'
-    path.write_text(json.dumps(dict(ms1_root='m1', ms2_root='m2', ids=['2310.12345'])))
+    path.write_text(json.dumps(dict(ms1_root='m1', ms2_root='m2', ids=['2310.12345'], population_count=5000)))
     assert main(['run', '--input', str(path), '--output', str(tmp_path / 'output')]) == 1
     report = json.loads((tmp_path / 'output/manifests/run.json').read_text())
     assert not report['complete'] and not report['synthetic']
+
+
+def test_cli_missing_population_count_reports_config_error_before_work(tmp_path, capsys):
+    from arxiv_pipeline.matching.cli import main
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps(dict(ms1_root='m1', ms2_root='m2', ids=['2310.12345'])))
+    output = tmp_path / 'output'
+    with pytest.raises(SystemExit) as exc:
+        main(['run', '--input', str(path), '--output', str(output)])
+    assert exc.value.code == 2
+    assert 'population_count' in capsys.readouterr().err
+    assert not output.exists()
+
+
+@pytest.mark.parametrize('override', [False, True])
+def test_cli_population_count_from_json_or_flag(tmp_path, monkeypatch, override):
+    from arxiv_pipeline.matching import cli
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps(dict(ms1_root='m1', ms2_root='m2', ids=['2310.12345'], population_count=5000)))
+    captured = {}
+
+    def run(config, **kwargs):
+        captured.update(config)
+        return {'complete': True}
+
+    monkeypatch.setattr(cli, 'run_matching', run)
+    argv = ['run', '--input', str(path), '--output', str(tmp_path / 'output')]
+    if override:
+        argv += ['--population-count', '25000']
+    assert cli.main(argv) == 0
+    assert captured['population_count'] == (25000 if override else 5000)
 
 
 def test_cli_accepts_native_paths_relative_to_config(tmp_path, monkeypatch):
