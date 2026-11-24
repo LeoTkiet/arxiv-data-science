@@ -558,11 +558,47 @@ def validate_six_tables(
 
     if manifest_part is not None:
         for pid in sorted(manifest_part):
+            if pid not in paper_ids:
+                errors.append(
+                    Issue(
+                        pid,
+                        "export",
+                        "papers_missing_split_publication",
+                        "error",
+                        f"Split publication {pid} is missing from papers table",
+                    )
+                )
+            if not bibtex_by_paper.get(pid):
+                errors.append(
+                    Issue(
+                        pid,
+                        "export",
+                        "bibtex_missing_split_publication",
+                        "error",
+                        f"Split publication {pid} has no rows in bibtex table",
+                    )
+                )
+            if pid not in pred_partitions_by_pub:
+                errors.append(
+                    Issue(
+                        pid,
+                        "export",
+                        "predictions_missing_split_publication",
+                        "error",
+                        f"Split publication {pid} has no rows in predictions table",
+                    )
+                )
             expected_qs = {(pid, ck) for ck in bibtex_by_paper.get(pid, set())}
             missing_qs = sorted(expected_qs - pred_keys)
             if missing_qs:
                 errors.append(
-                    Issue(pid, "export", "predictions_missing_split_queries", "error", f"Split paper {pid} missing {len(missing_qs)} predictions")
+                    Issue(
+                        pid,
+                        "export",
+                        "predictions_missing_split_queries",
+                        "error",
+                        f"Split paper {pid} missing {len(missing_qs)} predictions",
+                    )
                 )
 
     counts = {tname: len(clean[tname]) for tname in TABLE_NAMES}
@@ -655,6 +691,19 @@ def verify_parquet_export(
         expected_schema = ARROW_SCHEMAS[tname]
         dict_cols = DICTIONARY_COLUMNS.get(tname, set())
         table_rows = 0
+        expected_shard_paths = {shard["path"] for shard in tinfo["shards"]}
+        table_dir = root / "data" / tname
+        if table_dir.is_dir():
+            disk_parquets = {
+                p.relative_to(root).as_posix()
+                for p in table_dir.glob("*.parquet")
+                if p.is_file()
+            }
+            stale_local = sorted(disk_parquets - expected_shard_paths)
+            if stale_local:
+                raise ContractError(
+                    f"Unexpected stale local Parquet shard(s) in data/{tname}: {stale_local}"
+                )
         for shard in tinfo["shards"]:
             shard_path = root / shard["path"]
             if not shard_path.is_file():
@@ -755,7 +804,7 @@ def export_hf_dataset(
         n_shards = max(1, math.ceil(n_rows / max_rows_per_shard))
         table_dir = output_dir / "data" / tname
         table_dir.mkdir(parents=True, exist_ok=True)
-        for old_file in table_dir.glob("part-*.parquet"):
+        for old_file in table_dir.glob("*.parquet"):
             old_file.unlink()
 
         shard_entries: list[dict[str, Any]] = []
@@ -906,13 +955,28 @@ def upload_to_hf(
 
     hf_api = _get_hf_api(api=api, token=token)
     hf_api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
+    # Remove any stale remote Parquet shards from previous snapshots atomically
+    # in the same commit as the newly exported shards.
+    delete_patterns = [f"data/{tname}/*.parquet" for tname in TABLE_NAMES]
     hf_api.upload_folder(
         folder_path=str(root),
         repo_id=repo_id,
         repo_type="dataset",
         commit_message=commit_message,
+        delete_patterns=delete_patterns,
     )
-    visibility = verify_hf_repo_visibility(repo_id, token=token, api=hf_api)
+    visibility = verify_hf_repo_visibility(
+        repo_id,
+        token=token,
+        api=hf_api,
+        expected_manifest=manifest_data,
+    )
+    if visibility["stale_parquet_files"] or visibility["missing_parquet_files"]:
+        raise ContractError(
+            "Remote HF Parquet files do not match exported manifest: "
+            f"stale={visibility['stale_parquet_files']}, "
+            f"missing={visibility['missing_parquet_files']}"
+        )
     return {
         "repo_id": repo_id,
         "uploaded": True,
@@ -925,6 +989,7 @@ def verify_hf_repo_visibility(
     *,
     token: str | None = None,
     api: Any = None,
+    expected_manifest: ExportManifest | Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Check Hugging Face dataset repository visibility and presence of all 6 Parquet tables."""
     hf_api = _get_hf_api(api=api, token=token)
@@ -940,6 +1005,25 @@ def verify_hf_repo_visibility(
     }
     missing_tables = [tname for tname, paths in parquet_by_table.items() if not paths]
 
+    stale_parquet_files: list[str] = []
+    missing_parquet_files: list[str] = []
+    if expected_manifest is not None:
+        mdata = (
+            expected_manifest.to_dict()
+            if isinstance(expected_manifest, ExportManifest)
+            else dict(expected_manifest)
+        )
+        expected_files = {
+            shard["path"]
+            for tname in TABLE_NAMES
+            for shard in mdata["tables"][tname]["shards"]
+        }
+        remote_parquets = {
+            f for f in files if f.startswith("data/") and f.endswith(".parquet")
+        }
+        stale_parquet_files = sorted(remote_parquets - expected_files)
+        missing_parquet_files = sorted(expected_files - remote_parquets)
+
     return {
         "repo_id": repo_id,
         "exists": True,
@@ -949,4 +1033,11 @@ def verify_hf_repo_visibility(
         "all_six_tables_present": not missing_tables,
         "missing_tables": missing_tables,
         "parquet_files": parquet_by_table,
+        "stale_parquet_files": stale_parquet_files,
+        "missing_parquet_files": missing_parquet_files,
+        "exact_shard_match": (
+            not stale_parquet_files and not missing_parquet_files
+            if expected_manifest is not None
+            else None
+        ),
     }

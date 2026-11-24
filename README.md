@@ -4,7 +4,7 @@ Pipeline xử lý corpus arXiv theo phiên bản (**Version-Aware arXiv Corpus C
 
 - **Milestone 1 — Crawling:** Discovery mọi version từ arXiv API, tải và giải nén mã nguồn LaTeX (`.tex`/`.bib`, loại bỏ hình ảnh nhị phân), chuẩn hóa metadata và thu thập references từ Semantic Scholar API.
 - **Milestone 2 — Parsing:** Hợp nhất đường dẫn biên dịch LaTeX (`\input`/`\include`), dựng cây phân cấp phần tử, chuẩn hóa văn bản/công thức, hợp nhất BibTeX và khử trùng lặp đa phiên bản.
-- **Milestone 3 — Reference Matching & Final Dataset:** Gán nhãn manual/heuristic, chia tập chống rò rỉ theo publication, trích xuất đặc trưng, huấn luyện/so sánh mô hình xếp hạng, đánh giá **MRR@5**, kiểm định 6 bảng và xuất **sharded Parquet** lên **Hugging Face Hub**.
+- **Milestone 3 — Reference Matching & Final Dataset:** Snapshot loader, gán nhãn manual/heuristic, chia tập chống rò rỉ theo publication, trích xuất đặc trưng, huấn luyện/so sánh mô hình xếp hạng, đánh giá **MRR@5**, kiểm định 6 bảng và xuất **sharded Parquet** lên **Hugging Face Hub**.
 
 ---
 
@@ -24,7 +24,10 @@ arxiv-data-science/
 │   ├── MS2_RESOLVER.md                  # Đặc tả LaTeX resolver
 │   ├── MS2_HANDOFF.md                   # Biên bản bàn giao MS2
 │   ├── MS3_CONTRACTS.md                 # Hợp đồng matching & export MS3 (schema 3.0)
-│   └── matching/annotation_guideline.md # Quy chuẩn gán nhãn thủ công & heuristic (TV3)
+│   └── matching/
+│       ├── annotation_guideline.md      # Quy chuẩn gán nhãn thủ công & heuristic (TV3)
+│       ├── feature_dictionary.md        # Từ điển đặc trưng (TV2)
+│       └── feature_schema.json          # Schema đặc trưng cố định (TV2)
 ├── poster/
 │   └── README.md                        # Đặc tả bàn giao metrics/export cho poster A2 portrait
 ├── scripts/                             # Script hỗ trợ chạy pipeline & đồng bộ notebook
@@ -34,7 +37,8 @@ arxiv-data-science/
 │   ├── parsing/                         # Resolver, hierarchy, normalization, bibliography, deduplication
 │   ├── matching/
 │   │   ├── contracts.py                 # Typed records & validators MS3 (TV1)
-│   │   ├── cleaning.py, features.py     # Làm sạch & đặc trưng cặp BibTeX–Reference (TV2)
+│   │   ├── io.py, state.py, pipeline.py, adapters.py, cli.py, smoke.py # Loader & orchestrator (TV1)
+│   │   ├── cleaning.py, candidates.py, features.py, baseline.py        # Features & baseline (TV2)
 │   │   ├── heuristics.py, labeling.py   # Gán nhãn heuristic, CSV/CLI gán nhãn tay & QA (TV3)
 │   │   ├── model.py, train.py, analysis.py # Mô hình xếp hạng & phân tích lỗi trên valid (TV4)
 │   │   ├── split.py                     # Chia train/valid/test theo publication & leakage guard (TV5)
@@ -57,8 +61,7 @@ Yêu cầu **Python 3.10+**.
 ```powershell
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,reporting,matching]"
 ```
 
 Để truy vấn Semantic Scholar nhanh hơn khi chạy MS1, tạo tệp `.env` từ `.env.example` và đặt biến `S2_API_KEY` (không commit `.env`).
@@ -82,7 +85,7 @@ python -m arxiv_pipeline.crawling.s2.batch --input ids.txt --output data
 
 - Đầu ra nằm tách biệt trong `--output`: `manifests/`, `state/`, `raw/`, `corpus/`, `metadata/`, `references/`, `validation/`, `summary.json`.
 - Tôn trọng độ trễ tối thiểu 3 giây/request; không tải lại các stage terminal đã hoàn tất khi dùng `--resume`; dùng `--force` để chạy lại snapshot mới.
-- Benchmark Colab CPU-only xem [colab/MS1_Benchmark_CPU.ipynb](colab/MS1_Benchmark_CPU.ipynb) và [colab/README.md](colab/README.md).
+- Validator MS1 nằm ở `src/arxiv_pipeline/export/validation.py`. Benchmark Colab CPU-only xem [colab/MS1_Benchmark_CPU.ipynb](colab/MS1_Benchmark_CPU.ipynb) và [colab/README.md](colab/README.md).
 
 ### Milestone 2 — Parsing Offline
 
@@ -91,34 +94,71 @@ python main.py --stage parse --ms1-input artifacts/ms1-snapshot --output artifac
 ```
 
 - Đọc snapshot MS1 bất biến, ghi ra thư mục MS2 tách biệt theo luồng: `Resolver → Hierarchy → Normalization` song song `Resolver → Bibliography`, sau đó `Deduplication → Validate Parse`.
-- Chi tiết schema 2.0 và envelope xem [docs/MS2_CONTRACTS.md](docs/MS2_CONTRACTS.md) và [colab/MS2_Integration_CPU.ipynb](colab/MS2_Integration_CPU.ipynb).
+- Chi tiết schema 2.0 và envelope xem [docs/MS2_CONTRACTS.md](docs/MS2_CONTRACTS.md), [docs/MS2_HANDOFF.md](docs/MS2_HANDOFF.md) và [colab/MS2_Integration_CPU.ipynb](colab/MS2_Integration_CPU.ipynb).
 
 ### Milestone 3 — Reference Matching, Evaluation & Parquet Export
 
-#### 3.1. Giao thức gán nhãn (Labeling Protocol — TV3)
+Contract nhóm bản `3.0` nằm ở [docs/MS3_CONTRACTS.md](docs/MS3_CONTRACTS.md). Các module M3 dùng records/validators trong `arxiv_pipeline.matching.contracts`; `BibtexInput` dùng lại `BibtexRow` M2; checkpoint M3 truyền tường minh `schema_version=MATCHING_SCHEMA_VERSION`.
 
-Chi tiết tại [docs/matching/annotation_guideline.md](docs/matching/annotation_guideline.md) và [docs/MS3_CONTRACTS.md](docs/MS3_CONTRACTS.md):
+#### 3.1. TV1 — Loader, CLI và Orchestration (T1-02 đến T1-04)
+
+Loader `matching/io.py` đọc snapshot M1/M2 ở chế độ chỉ đọc. Một publication chỉ `ready` khi references M1 có checkpoint/QA hợp lệ; M2 đã xử lý đủ version `1..N`, manifest complete, QA đúng snapshot và các artifact khớp hash checkpoint. Run toàn luồng đọc thêm checkpoint metadata MS1 và các bảng `elements`/`hierarchy` đã dedup của MS2 ngay khi tạo snapshot, giữ nguyên năm bảng nguồn cùng hash cho bước export.
+
+Chạy smoke offline (dùng các adapter **synthetic** — không phải số đo thực nghiệm):
+
+```powershell
+python main.py matching smoke --output artifacts/ms3-smoke
+python main.py matching smoke --output artifacts/ms3-smoke --resume
+```
+
+Sau khi cài `pip install -e ".[dev,reporting,matching]"`, có thể gọi trực tiếp `matching smoke ...` hoặc `arxiv-pipeline matching smoke ...`.
+
+Chạy production trên dữ liệu thật với config JSON (đường dẫn tương đối tính từ thư mục chứa config; bắt buộc khai báo `population_count` theo phạm vi thực được giao):
+
+```json
+{
+  "ms1_root": "snapshots/ms1",
+  "ms2_root": "snapshots/ms2",
+  "ids": ["2410.08024"],
+  "labels": "labels.json",
+  "partitions": "partitions.json",
+  "population_count": 25000,
+  "seed": 7
+}
+```
+
+```powershell
+python main.py matching run --input matching-config.json --output artifacts/ms3 --resume
+```
+
+- Bỏ `partitions` trong config để dùng `split.create_split` của TV5.
+- Luồng xử lý: `load → clean/labels theo publication → split toàn tập → features theo publication → train (train/valid) → score → rank → evaluate → export`.
+- Binding TV1 trong `matching/adapters.py` nối trực tiếp API TV5: `split.create_split`, `prediction.build_predictions(bundles, None, scores, labels, partition_manifest)`, `evaluation.evaluate` (giữ trọn `report` TV5 cùng `mrr_at_5` và `queries`) và `export.export_dataset` (ghi 6 bảng tại `dataset/data/<table>/`, `dataset/export_manifest.json`, `dataset/README.md` và khai báo mọi shard để kiểm hash khi `--resume`).
+- `matching run` chỉ xuất local; publication lên Hugging Face Hub là bước riêng của TV5 sau khi kiểm định dữ liệu thật.
+
+#### 3.2. TV3 — Giao thức gán nhãn (Labeling Protocol)
+
+Chi tiết tại [docs/matching/annotation_guideline.md](docs/matching/annotation_guideline.md):
 
 - **Phạm vi đối chiếu:** Chỉ ghép cặp trong cùng một publication `(arxiv_id, citation_key) ↔ ref_arxiv_id`.
-- **3 quyết định (`decision`):** `matched` (`groundtruth_arxiv_id != null`), `unmatched` (`null`, chắc chắn không có arXiv reference tương ứng), và `uncertain` (`null`, cần review chéo — không đưa vào supervised train/eval).
+- **3 quyết định (`decision`):** `matched` (`groundtruth_arxiv_id != null`), `unmatched` (`null`), và `uncertain` (`null`, cần review chéo — không đưa vào supervised train/eval).
 - **Trạng thái duyệt (`review_status`):** Chỉ nhãn có `review_status="accepted"` và `decision != "uncertain"` (`LabelRecord.is_supervised == True`) mới tham gia huấn luyện và tính MRR@5.
 - **Định mức nhóm 5 người (`k = 5`):**
   - **Manual pool (Gold):** ≥ 25 publications (mỗi thành viên ≥ 5 publications), mỗi bài ≥ 20 BibTeX entries đã gán nhãn → tổng ≥ 500 entries.
-  - **Automatic pool (Silver):** ≥ `max(ceil(0.1 × (N − M)), 10)` publications ngoài manual pool; gán nhãn 100% BibTeX entries của các bài được chọn và kiểm định chất lượng bằng spot-check audit.
+  - **Automatic pool (Silver):** ≥ `max(ceil(0.1 × (N − M)), 10)` publications ngoài manual pool; gán nhãn 100% BibTeX entries của các bài được chọn và kiểm định bằng spot-check audit.
 - Công cụ gán nhãn tay: `export_annotation_sheet`, `run_interactive_cli`, `load_annotation_sheet`, `audit_label_manifest` trong `src/arxiv_pipeline/matching/labeling.py`.
 
-#### 3.2. Đặc trưng & Mô hình (TV2 & TV4)
+#### 3.3. TV2 & TV4 — Đặc trưng, Baseline & Mô hình
 
-- **Đặc trưng cặp (`PairFeature` / `FeatureSchema`):** 4 nhóm đặc trưng (`title`, `author`, `identifier`, `temporal`), mọi transformer học từ corpus (TF-IDF, imputer, scaler) chỉ `fit` trên tập **train** rồi `transform` sang `valid`/`test`. Các cột định danh và metadata nhãn (`arxiv_id`, `citation_key`, `ref_arxiv_id`, `groundtruth_arxiv_id`, `label_source`, `confidence`, `partition`) bị chặn tuyệt đối ở tầng contract.
-- **Mô hình (`model.py` / `train.py`):** Hỗ trợ `logreg`, `rf`, `hgb`, `lambdamart`; negative sampling chỉ áp dụng trên `train`; chọn siêu tham số và mô hình tốt nhất chỉ dựa trên **Validation MRR@5**; tập `test` bị khóa hoàn toàn cho tới bước đánh giá cuối của TV5.
-- Chạy thử nghiệm mock (chỉ kiểm luồng, **không phải kết quả thực nghiệm**):
+- **Đặc trưng cặp (`cleaning.py`, `candidates.py`, `features.py`, `baseline.py`):** 4 nhóm đặc trưng (`title`, `author`, `identifier`, `temporal`, xem [docs/matching/feature_dictionary.md](docs/matching/feature_dictionary.md) và [docs/matching/feature_schema.json](docs/matching/feature_schema.json)); mọi transformer học từ dữ liệu chỉ `fit` trên tập **train**. Các cột định danh và metadata nhãn bị chặn tuyệt đối ở tầng contract.
+- **Mô hình (`model.py`, `train.py`, `analysis.py`):** Hỗ trợ `logreg`, `rf`, `hgb`, `lambdamart`; negative sampling chỉ áp dụng trên `train`; chọn siêu tham số và mô hình tốt nhất chỉ dựa trên **Validation MRR@5**; tập `test` bị khóa hoàn toàn cho tới bước đánh giá cuối của TV5.
 
 ```powershell
 python -m arxiv_pipeline.matching.train --mock --out artifacts/ms3_mock
 python -m arxiv_pipeline.matching.analysis --mock
 ```
 
-#### 3.3. Chia tập, Đánh giá MRR@5 & Xuất Sharded Parquet (TV5)
+#### 3.4. TV5 — Chia tập, Đánh giá MRR@5 & Xuất Sharded Parquet
 
 1. **Chia tập theo publication (`matching/split.py`):**
    - `create_split(label_manifest, population_manifest, *, seed=42, group_size=5) -> PartitionManifest`
@@ -131,11 +171,11 @@ python -m arxiv_pipeline.matching.analysis --mock
      $$\text{MRR@5} = \frac{1}{|Q|} \sum_{q \in Q} \text{RR@5}(q), \qquad \text{RR@5}(q) = \begin{cases} 1/r & \text{nếu đáp án ở hạng } r \le 5 \\ 0 & \text{nếu miss hoặc } \texttt{unmatched} \end{cases}$$
      Mọi query đã gán nhãn hợp lệ (`matched` và `unmatched`, kể cả 0-candidate) đều nằm trong mẫu số `|Q|`. Report luôn ghi rõ `unmatched_policy="include_zero_in_denominator"` kèm chỉ số chẩn đoán bổ sung (`mrr_at_5_matched_only`, `recall_at_1/3/5`).
 3. **Đánh giá TV4 vs Baseline TV2 (`matching/evaluation.py`):**
-   - `evaluate_scores(bundles, scores, labels, partition_manifest, *, partition="test", baseline_scores=...)` tạo báo cáo JSON (`allow_nan=False`) gồm metrics, `prediction_preview`, `slices` (pool, metadata, candidate count, per-publication), `confusion_and_errors` và delta so sánh với baseline.
+   - `evaluate(...)` và `evaluate_scores(bundles, scores, labels, partition_manifest, *, partition="test", baseline_scores=...)` tạo báo cáo JSON (`allow_nan=False`) gồm metrics, `prediction_preview`, `slices`, `confusion_and_errors` và delta so sánh với baseline.
 4. **Kiểm định 6 bảng, Sharded Parquet & Hugging Face Hub (`matching/export.py`):**
    - `prepare_published_references(raw_refs)` lọc giữ các reference có `ref_arxiv_id != null` theo đúng quy định xuất bản MS1/MS3.
-   - `export_hf_dataset(tables, paths, ...)` kiểm định toàn bộ khóa chính, khóa ngoại liên bảng, kiểu dữ liệu, dictionary encoding và tính toàn vẹn partition; ghi sharded Parquet nguyên tử; tự động đọc ngược (`verify_parquet_export`) kiểm tra schema, tổng số hàng và SHA-256; sinh `export_manifest.json` và `README.md` dataset card YAML chuẩn Hugging Face (`data/<table>/*.parquet`, không dùng loading script tùy chỉnh).
-   - `upload_to_hf(...)` **chặn cứng** mọi nỗ lực upload dữ liệu `synthetic=True` hoặc chưa qua read-back verification; `verify_hf_repo_visibility(...)` xác minh repo public và đủ 6 bảng Parquet.
+   - `export_hf_dataset(tables, paths, ...)` / `export_dataset(...)` kiểm định toàn bộ khóa chính, khóa ngoại liên bảng, **đủ mọi publication thuộc `PartitionManifest`** trong `papers`, `bibtex` và `predictions`, kiểu dữ liệu, dictionary encoding và tính toàn vẹn partition; ghi sharded Parquet nguyên tử; tự động đọc ngược (`verify_parquet_export`) kiểm tra schema, tổng số hàng và SHA-256; sinh `export_manifest.json` và `README.md` dataset card YAML chuẩn Hugging Face (`data/<table>/*.parquet`, không dùng loading script tùy chỉnh).
+   - `upload_to_hf(...)` **chặn cứng** mọi nỗ lực upload dữ liệu `synthetic=True` hoặc chưa qua read-back verification, đồng thời dùng `delete_patterns` để xóa shard cũ trên remote khi cập nhật snapshot mới và xác minh không còn shard dư thừa qua `verify_hf_repo_visibility(...)`.
 
 ---
 
@@ -171,11 +211,11 @@ Cấu trúc repository dataset trên Hugging Face:
 Toàn bộ test chạy offline, không gọi mạng hay ghi đè dữ liệu thật:
 
 ```powershell
-# Chạy riêng bộ test Milestone 3 (TV1, TV3, TV4, TV5)
-python -m pytest tests/matching/ -v
+# Chạy toàn bộ bộ test Milestone 3 (TV1–TV5 & tích hợp native TV1–TV5)
+python -m pytest tests/matching tests/pipeline/test_cli.py -q
 
 # Chạy riêng bộ test TV5 (split, MRR@5, predictions, evaluation, 6-table Parquet & HF guards)
-python -m pytest tests/matching/test_evaluation.py tests/matching/test_export.py -v
+python -m pytest tests/matching/test_evaluation.py tests/matching/test_export.py tests/matching/test_tv5_integration.py -v
 
 # Chạy toàn bộ test suite (MS1 + MS2 + MS3)
 python -m pytest -q

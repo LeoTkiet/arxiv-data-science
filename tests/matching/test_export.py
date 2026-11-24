@@ -346,7 +346,42 @@ def test_six_table_consistency_rejects_broken_fks_dtypes_and_leakage(mutator, ex
     assert expected_code in {e.code for e in report.errors}
 
 
+def test_export_rejects_deleted_split_publication(tmp_path):
+    """P1 regression: dropping an entire split publication from all 6 tables must fail."""
+    tables, part_manifest = _valid_six_tables()
+    dropped_pid = "2310.00002"
+    truncated = {
+        tname: [row for row in rows if row.get("arxiv_id") != dropped_pid]
+        for tname, rows in tables.items()
+    }
+    report, _ = validate_six_tables(truncated, partition_manifest=part_manifest)
+    assert not report.valid
+    codes = {e.code for e in report.errors}
+    assert "papers_missing_split_publication" in codes
+    assert "bibtex_missing_split_publication" in codes
+    assert "predictions_missing_split_publication" in codes
+
+    with pytest.raises(ContractError, match="6-table consistency check failed"):
+        export_hf_dataset(
+            truncated,
+            tmp_path / "missing_pub_out",
+            partition_manifest=part_manifest,
+            synthetic=False,
+        )
+
+    # Even if papers keeps the row, removing its bibtex & predictions must also fail
+    missing_bp = deepcopy(tables)
+    missing_bp["bibtex"] = [r for r in missing_bp["bibtex"] if r["arxiv_id"] != dropped_pid]
+    missing_bp["predictions"] = [r for r in missing_bp["predictions"] if r["arxiv_id"] != dropped_pid]
+    report_bp, _ = validate_six_tables(missing_bp, partition_manifest=part_manifest)
+    assert not report_bp.valid
+    assert "bibtex_missing_split_publication" in {e.code for e in report_bp.errors}
+    assert "predictions_missing_split_publication" in {e.code for e in report_bp.errors}
+
+
 def test_hf_upload_blocks_synthetic_and_verifies_visibility_for_real(tmp_path):
+    from fnmatch import fnmatch
+
     tables, part_manifest = _valid_six_tables()
 
     @dataclass
@@ -355,32 +390,39 @@ def test_hf_upload_blocks_synthetic_and_verifies_visibility_for_real(tmp_path):
         gated: bool = False
 
     class FakeHfApi:
-        def __init__(self, *, private=False, gated=False, omit_table=None):
+        def __init__(self, *, private=False, gated=False, omit_table=None, ignore_delete_patterns=False):
             self.private = private
             self.gated = gated
             self.omit_table = omit_table
+            self.ignore_delete_patterns = ignore_delete_patterns
             self.created = []
             self.uploaded = []
-            self.files = []
+            self.files: set[str] = set()
 
         def create_repo(self, *, repo_id, repo_type, private, exist_ok):
             self.created.append((repo_id, repo_type, private, exist_ok))
 
-        def upload_folder(self, *, folder_path, repo_id, repo_type, commit_message):
-            self.uploaded.append((folder_path, repo_id, repo_type))
+        def upload_folder(self, *, folder_path, repo_id, repo_type, commit_message, delete_patterns=None):
+            self.uploaded.append((folder_path, repo_id, repo_type, delete_patterns))
             root = Path(folder_path)
-            self.files = [
-                p.relative_to(root).as_posix()
-                for p in root.rglob("*")
-                if p.is_file()
-                and (self.omit_table is None or f"data/{self.omit_table}/" not in p.relative_to(root).as_posix())
-            ]
+            if delete_patterns and not self.ignore_delete_patterns:
+                patterns = [delete_patterns] if isinstance(delete_patterns, str) else list(delete_patterns)
+                self.files = {
+                    f for f in self.files if not any(fnmatch(f, pat) for pat in patterns)
+                }
+            for p in root.rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(root).as_posix()
+                if self.omit_table is not None and f"data/{self.omit_table}/" in rel:
+                    continue
+                self.files.add(rel)
 
         def dataset_info(self, *, repo_id):
             return FakeDatasetInfo(private=self.private, gated=self.gated)
 
         def list_repo_files(self, *, repo_id, repo_type):
-            return list(self.files)
+            return sorted(self.files)
 
     syn_dir = tmp_path / "syn"
     syn_manifest = export_hf_dataset(tables, syn_dir, partition_manifest=part_manifest, synthetic=True)
@@ -389,28 +431,55 @@ def test_hf_upload_blocks_synthetic_and_verifies_visibility_for_real(tmp_path):
         upload_to_hf(syn_dir, "group6/arxiv-matching", manifest=syn_manifest, api=fake_api)
     assert fake_api.created == [] and fake_api.uploaded == []
 
+    # First upload: max_rows_per_shard=1 creates 20 shards across the 6 tables
     real_dir = tmp_path / "real"
-    real_manifest = export_hf_dataset(
+    first_manifest = export_hf_dataset(
         tables,
         real_dir,
         partition_manifest=part_manifest,
-        max_rows_per_shard=2,
+        max_rows_per_shard=1,
         synthetic=False,
         upload=True,
         repo_id="group6/arxiv-matching",
         api=fake_api,
     )
-    assert real_manifest.ready_for_hf_upload is True
-    assert len(fake_api.created) == 1
-    assert len(fake_api.uploaded) == 1
+    assert first_manifest.ready_for_hf_upload is True
+    first_parquets = [f for f in fake_api.files if f.endswith(".parquet")]
+    assert len(first_parquets) == 20
 
-    vis_public = verify_hf_repo_visibility("group6/arxiv-matching", api=fake_api)
+    # Second upload to SAME repo with max_rows_per_shard=100 -> must replace stale shards with exact 6 shards
+    second_manifest = export_hf_dataset(
+        tables,
+        real_dir,
+        partition_manifest=part_manifest,
+        max_rows_per_shard=100,
+        synthetic=False,
+        upload=True,
+        repo_id="group6/arxiv-matching",
+        api=fake_api,
+    )
+    assert len(fake_api.uploaded) == 2
+    assert fake_api.uploaded[-1][3] == [f"data/{t}/*.parquet" for t in TABLE_NAMES]
+    second_parquets = [f for f in fake_api.files if f.endswith(".parquet")]
+    assert len(second_parquets) == 6
+
+    vis_public = verify_hf_repo_visibility(
+        "group6/arxiv-matching", api=fake_api, expected_manifest=second_manifest
+    )
     assert vis_public["publicly_accessible"] is True
     assert vis_public["all_six_tables_present"] is True
     assert vis_public["missing_tables"] == []
+    assert vis_public["stale_parquet_files"] == []
+    assert vis_public["exact_shard_match"] is True
+
+    # If a remote still retains stale shards, upload_to_hf must raise ContractError
+    stale_api = FakeHfApi(ignore_delete_patterns=True)
+    stale_api.files = set(first_parquets) | {"README.md", "export_manifest.json"}
+    with pytest.raises(ContractError, match="Remote HF Parquet files do not match"):
+        upload_to_hf(real_dir, "group6/arxiv-matching", manifest=second_manifest, api=stale_api)
 
     private_api = FakeHfApi(private=True)
-    private_api.files = fake_api.files
+    private_api.files = set(fake_api.files)
     vis_priv = verify_hf_repo_visibility("group6/arxiv-matching", api=private_api)
     assert vis_priv["private"] is True
     assert vis_priv["publicly_accessible"] is False

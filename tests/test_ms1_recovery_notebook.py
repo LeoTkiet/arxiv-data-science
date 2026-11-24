@@ -29,6 +29,21 @@ def notebook(tmp_path):
     return distributed
 
 
+def test_embedded_runtime_is_identical_for_windows_and_unix_zip_defaults(tmp_path, monkeypatch):
+    build = runpy.run_path(str(ROOT / 'scripts/build_ms1_recovery_notebook.py'))['build']
+    original_info = zipfile.ZipInfo
+    digests = []
+    for host_creator in (0, 3):
+        class HostZipInfo(original_info):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.create_system = host_creator
+
+        monkeypatch.setattr(zipfile, 'ZipInfo', HostZipInfo)
+        digests.append(build(ROOT, tmp_path / f'host-{host_creator}.ipynb'))
+    assert digests[0] == digests[1], 'Runtime ZIP must not depend on host OS creator metadata'
+
+
 def compiled(cell, overrides=None):
     tree = ast.parse(''.join(cell['source']))
     for node in tree.body:
