@@ -217,8 +217,111 @@ Các module M3 dùng records/validators trong `arxiv_pipeline.matching.contracts
 [Compatibility fixtures](tests/fixtures/matching/README.md) có exact, ambiguous,
 unmatched, empty references và split mock cho nhóm 5 người. Không dùng dữ liệu
 synthetic làm bằng chứng nghiệm thu. Task này cung cấp schema/validators/fixtures;
-loader snapshot và pipeline matching end-to-end chưa triển khai.
+phần triển khai tiếp theo của loader và orchestration được mô tả bên dưới.
 
 ```powershell
 python -m pytest tests/matching/test_contracts.py -q
+```
+
+### TV1: loader, CLI và orchestration (T1-02 đến T1-04)
+
+Loader `matching/io.py` đọc snapshot M1/M2 ở chế độ chỉ đọc. Một publication
+chỉ `ready` khi references M1 có checkpoint/QA hợp lệ; M2 đã xử lý đủ version,
+manifest complete, QA đúng snapshot và các artifact khớp hash checkpoint.
+Thiếu checkpoint/API lỗi khác với references rỗng đã được xác nhận.
+`load_publication(arxiv_id, context)` trả `PublicationBundle`;
+`load_with_provenance` trả thêm inventory SHA-256 và danh tính snapshot.
+References không có arXiv ID được ghi issue và giữ nguyên ở nguồn.
+
+Chạy smoke offline, dùng các adapter **synthetic** cho mọi bước:
+
+```powershell
+python main.py matching smoke --output artifacts/ms3-smoke
+python main.py matching smoke --output artifacts/ms3-smoke --resume
+```
+
+Lệnh tạo snapshot giả lập riêng ở thư mục `ms3-smoke-fixture-input` cùng cấp
+với output. Không ghi đè fixture đã có khi resume. Kết quả smoke và sáu tệp
+JSON export đều đánh dấu synthetic; chúng không phải nhãn thật, số đo ML,
+Parquet hoặc bằng chứng đạt quota. Sau `pip install -e ".[dev,reporting,matching]"`,
+cũng có thể gọi `matching smoke ...` hoặc `arxiv-pipeline matching smoke ...`.
+
+Để chạy trên dữ liệu thật, chuẩn bị config JSON; đường dẫn tương đối được
+hiểu từ thư mục chứa config:
+
+```json
+{
+  "ms1_root": "snapshots/ms1",
+  "ms2_root": "snapshots/ms2",
+  "ids": ["2410.08024"],
+  "labels": "labels.json",
+  "partitions": "partitions.json",
+  "population_count": 25000,
+  "seed": 7
+}
+```
+
+```powershell
+python main.py matching run --input matching-config.json --output artifacts/ms3 --resume
+```
+
+`labels.json` chứa danh sách `LabelRecord`; `partitions.json` là
+`PartitionManifest` theo contract 3.0. Bỏ `partitions` để dùng module split
+của TV5 khi được bàn giao. Population count lấy từ phạm vi thực được giao;
+không thu nhỏ theo số bài đã parse. Production bắt buộc khai báo
+`population_count` trong JSON hoặc `--population-count`; giá trị phải là số
+nguyên dương không nhỏ hơn số ID được chọn. Thiếu/sai giá trị sẽ báo lỗi cấu
+hình trước khi đọc snapshot hoặc ghi output; không tự lấy `len(ids)` làm mẫu số.
+Nếu không dùng nhãn ngoài, phải chọn
+`--auto-label` tường minh và có module heuristic TV3. `uncertain/pending`
+không được dùng làm targets. Gán nhãn thủ công vẫn do thành viên thực hiện.
+
+Luồng xử lý: load → clean/labels theo publication → split toàn tập → features
+theo publication → train bằng train/valid → score → rank → evaluate → export.
+Chỉ các phép features cố định, không học tham số, được nối bằng adapter TV2
+hiện tại; transformer học từ dữ liệu phải được fit trên train theo contract.
+Test labels không được chuyển vào adapter huấn luyện.
+
+Nếu TV5 chưa bàn giao `prediction.build_predictions`, bước rank dùng
+`baseline.rank_top5_predictions` của TV2 với score đã có từ bước score, truyền
+`manifest` và `labels` theo tên tham số. Không tính lại score bằng baseline.
+Payload rank ghi tên hàm đã dùng; lỗi import/thực thi của API TV5 đã bàn giao
+vẫn làm stage thất bại. Split, evaluate và export chưa bàn giao vẫn báo lỗi.
+
+Loader giữ quy ước MS2: đủ version `1..N` khớp parsing state, manifest và QA.
+Version không có source vẫn giữ trong manifest với trạng thái `no_source`.
+Danh sách khuyết như `[2]` hoặc `[1, 3]` chưa đáp ứng contract MS2 hiện tại;
+không tự bỏ version để nhận snapshot đó là complete. Lỗi của bài được ghi riêng,
+các bài khác vẫn được kiểm tra; run có lỗi chặn giữ `complete=false`.
+
+Các module chưa bàn giao trả `not_implemented`, run có `complete=false` và
+exit code `1`. Không tự chuyển sang mock trong chế độ production. Hiện loader
+và framework có thể chạy độc lập; nghiệm thu end-to-end bằng module thật còn
+phụ thuộc TV2/TV3/TV5. Một publication lỗi vẫn giữ kết quả của các bài khác,
+nhưng chặn train/export của lượt tích hợp để không âm thầm đổi tập đánh giá.
+
+`manifests/run.json` ghi schema 3.0, source version (`-dirty` nếu chưa commit),
+run ID, snapshot IDs, label/split/schema IDs và complete. Artifact từng stage
+nằm ở `matching/<stage>/<paper_key|_run>/result.json`; checkpoints có inventory
+SHA-256 ở `state/stages/<stage>/<paper_key|_run>/paper.json`. Checkpoint reuse
+giữ `origin_run_id` và ghi run hiện tại riêng. Chỉ cache stage success khi
+input/config/code/dependencies và mọi artifact còn khớp. Snapshot hoặc file
+labels/split đổi trong lúc chạy làm lượt chạy incomplete. Không chạy đồng thời
+nhiều tiến trình ghi cùng output root. `--force` và `--resume` loại trừ nhau.
+
+TV2–TV5 có thể nối adapter `(context, output_root) -> dict` hoặc `StageOutput`:
+payload JSON được framework ghi atomic; model/export phải khai báo thêm mọi
+tệp binary để framework hash. Các binding nghiệp vụ nằm ở
+`matching/adapters.py`; loader/orchestrator không sửa schema dùng chung hoặc
+thay thuật toán của thành viên khác. CI chạy tests toàn repo và smoke/resume.
+
+Kiểm chứng loader local ngày 17/11/2026 trên `2410.08024`: 117 BibTeX,
+81 references M1 gốc, 36 candidates có arXiv ID; mọi hash đầu vào giữ nguyên.
+Receipt ở `artifacts/ms3-tv1-real-20261117/integration-receipt.json` (artifact
+local, không commit dữ liệu). Đây là nghiệm thu loader một publication, chưa
+phải kết quả train/evaluation MS3. Adapter TV4 thật cũng được kiểm thử trên
+fixtures, gồm chặn test labels và khôi phục model hỏng khi resume.
+
+```powershell
+python -m pytest tests/matching tests/pipeline/test_cli.py -q
 ```
