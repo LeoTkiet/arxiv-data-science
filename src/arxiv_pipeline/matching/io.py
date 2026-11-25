@@ -77,6 +77,12 @@ class ZipSnapshot:
     def close(self) -> None:
         self.archive.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
 
 def ms2_snapshot_path(root: Path) -> Path:
     """Accept an extracted root, a ZIP path, or a folder containing one MS2 ZIP."""
