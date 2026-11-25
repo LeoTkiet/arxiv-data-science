@@ -16,7 +16,9 @@ Kết quả trong `output/first_pass/`:
 - `uncertain_rows.json`: key, rule, confidence và đường dẫn bundle cho các
   entry cần xem lại.
 - `first_pass_manifest.json`: tổng nhãn, số bài phủ đủ entries tạm thời,
-  số abstain, phân bố rule/quyết định và quota tối thiểu.
+  số abstain, phân bố rule/quyết định và quota tối thiểu. Báo cáo tách riêng
+  số bài phủ đủ **có references**, **không có references** và **có ít nhất một
+  matched** để không nhầm nhãn unmatched tầm thường với matching có ứng viên.
 - `per_publication/`: nhãn từng bài và receipt có hash để chạy lại không phải
   gán lại bài đã hoàn tất.
 

@@ -39,6 +39,9 @@ def test_first_pass_reports_full_coverage_and_uncertain_without_handoff(tmp_path
     assert summary["prepared_ready"] == 2
     assert summary["total_labels"] == 2
     assert summary["candidate_full_coverage_publications"] == 1
+    assert summary["full_coverage_with_references"] == 1
+    assert summary["full_coverage_without_references"] == 0
+    assert summary["full_coverage_with_match"] == 1
     assert summary["uncertain_entries"] == 1
     assert summary["ready_for_handoff"] is False
     labels = json.loads((output / "draft_labels.json").read_text())

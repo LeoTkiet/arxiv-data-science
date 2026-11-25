@@ -23,3 +23,11 @@ Kết quả nằm ở `T3-05/output/diagnostic/`: `candidate_scan.json`,
 `pilot_selection.json`, `prepared/prepared_manifest.json`,
 `first_pass/first_pass_manifest.json` và nhãn nháp. Pilot **không được bàn giao
 cho TV5** khi chưa qua spot-check, validate và chốt coverage.
+
+## Kết quả pilot ban đầu và cách hiểu
+
+Pilot đầu có 219 bài ready và 86 bài phủ đủ, nhưng 63/86 bài phủ đủ không có
+reference ứng viên. Trong 156 bài có references, chỉ 23 bài phủ đủ (14,7%).
+Vì vậy không được dùng tỷ lệ 86/219 để dự đoán chất lượng matching hoặc mở rộng
+pool theo cùng tiêu chí mà không kiểm tra thêm. Cần xem riêng coverage của bài
+có references, tỷ lệ matched/unmatched và spot-check các rule trước khi mở rộng.

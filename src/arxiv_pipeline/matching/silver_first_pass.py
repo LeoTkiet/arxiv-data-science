@@ -56,6 +56,9 @@ def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
     publications = []
     total_entries = 0
     candidate_full_coverage = 0
+    full_with_references = 0
+    full_without_references = 0
+    full_with_match = 0
     rule_counts: dict[str, int] = {}
     decision_counts = {"matched": 0, "unmatched": 0, "uncertain": 0}
 
@@ -88,12 +91,20 @@ def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
             raise ContractError(f"First-pass labels failed query/FK validation: {paper}")
         labels.extend(paper_labels)
         total_entries += len(bundle.bibtex)
+        reference_count = len(bundle.references)
+        if row.get("reference_count", reference_count) != reference_count:
+            raise ContractError(f"Prepared reference count mismatch: {paper}")
         accepted = sum(label.is_supervised for label in paper_labels)
         abstain = sum(label.decision == "uncertain" for label in paper_labels)
+        matched = sum(label.decision == "matched" for label in paper_labels)
         full = bool(bundle.bibtex) and accepted == len(bundle.bibtex) and abstain == 0
         candidate_full_coverage += full
+        full_with_references += bool(full and reference_count)
+        full_without_references += bool(full and not reference_count)
+        full_with_match += bool(full and matched)
         publications.append(dict(arxiv_id=paper, member=row["member"], bibtex_count=len(bundle.bibtex),
-                                 accepted=accepted, uncertain=abstain, candidate_full_coverage=full))
+                                 reference_count=reference_count, accepted=accepted, matched=matched,
+                                 uncertain=abstain, candidate_full_coverage=full))
         for label in paper_labels:
             decision_counts[label.decision] += 1
             rule = label.notes or "rule=unknown"
@@ -117,6 +128,9 @@ def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
                    minimum_auto_publications=minimum, prepared_ready=len(ready),
                    total_entries=total_entries, total_labels=len(labels),
                    candidate_full_coverage_publications=candidate_full_coverage,
+                   full_coverage_with_references=full_with_references,
+                   full_coverage_without_references=full_without_references,
+                   full_coverage_with_match=full_with_match,
                    uncertain_entries=len(uncertain), decision_counts=decision_counts,
                    rule_counts=rule_counts, publications=publications,
                    ready_for_handoff=False,
