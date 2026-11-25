@@ -3,10 +3,14 @@
 Nhánh `feature/m3-tv3-auto-labeling` thực hiện ba bước đầu. Mẫu số đã chốt là
 16.321 bài MS2 `success` và `complete=true`; 25 bài manual được loại, còn 16.296
 bài đủ điều kiện. Quota tối thiểu là `ceil(0.1 * 16296) = 1630` bài.
+Chọn trước 2.000 bài (400 bài/thành viên) và 150 ID dự phòng để thay bài
+không ready. Manifest có các key `publication_ids`, `population_count`,
+`population_snapshot_id` theo contract của `split.py`. File
+`exclusion_report.json` ghi lý do 8.679 ID không vào population.
 
 ## Đầu vào
 
-- `population_manifest.json` trong gói T3-05, gồm `population_ids` và
+- `population_manifest.json` trong gói T3-05, gồm `publication_ids` và
   `excluded_manual_ids`. File dữ liệu thật nằm ngoài Git.
 - Năm thư mục MS1 `data/` và năm thư mục MS2 đã giải nén từ kết quả cuối.
   `roots.json` có dạng:
@@ -28,7 +32,7 @@ không điền URL Drive hoặc đường dẫn tới ZIP. MS1 root phải có `
 ## Chạy
 
 Mở `colab/MS3_T3_05_Silver_Pool_Prepare_CPU.ipynb` trên Colab CPU và chạy ba cell.
-Cell 2 chọn 1.630 bài, cân bằng 326 bài/thành viên bằng SHA-256 của seed và ID,
+Cell 2 chọn 2.000 bài, cân bằng 400 bài/thành viên bằng SHA-256 của seed và ID,
 thêm 30 ID dự phòng/thành viên. Cùng manifest và seed cho cùng kết quả. Cell 3
 gọi `matching.io.load_with_provenance` để xác thực checkpoint, QA và hash nguồn.
 Mỗi bundle ready được lưu riêng cùng receipt; chạy lại sẽ bỏ qua bundle có hash
@@ -37,7 +41,7 @@ khớp. `prepared_manifest.json` ghi bài ready và not_ready.
 CLI tương đương:
 
 ```text
-python scripts/silver_pool.py select --population population_manifest.json --ranges configs/ms1_group6_ranges.json --output selection.json --seed 42
+python scripts/silver_pool.py select --population population_manifest.json --ranges configs/ms1_group6_ranges.json --output selection.json --seed 42 --target-count 2000
 python scripts/silver_pool.py prepare --selection selection.json --roots roots.json --output prepared
 ```
 

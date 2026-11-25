@@ -15,6 +15,7 @@ def main():
     select.add_argument("--output", type=Path, required=True)
     select.add_argument("--seed", type=int, default=42)
     select.add_argument("--reserve-per-member", type=int, default=30)
+    select.add_argument("--target-count", type=int, default=None)
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--selection", type=Path, required=True)
     prepare.add_argument("--roots", type=Path, required=True)
@@ -22,7 +23,8 @@ def main():
     args = parser.parse_args()
     if args.command == "select":
         result = select_pool(args.population, args.ranges, args.output,
-                             seed=args.seed, reserve_per_member=args.reserve_per_member)
+                             seed=args.seed, reserve_per_member=args.reserve_per_member,
+                             target_count=args.target_count)
         print(json.dumps({"selected": sum(map(len, result["selected"].values())),
                           "minimum": result["minimum_auto_count"], "output": str(args.output)}))
     else:

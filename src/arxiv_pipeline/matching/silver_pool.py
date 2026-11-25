@@ -27,13 +27,13 @@ def _owner(paper: str, ranges: dict) -> str:
 
 
 def select_pool(population_path: Path, ranges_path: Path, output: Path, *, seed: int = 42,
-                reserve_per_member: int = 30) -> dict:
+                reserve_per_member: int = 30, target_count: int | None = None) -> dict:
     """Freeze a balanced, reproducible primary selection and reserve queue."""
     population = _read(population_path)
-    ids = population.get("population_ids")
+    ids = population.get("publication_ids", population.get("population_ids"))
     manual = population.get("excluded_manual_ids")
     if not isinstance(ids, list) or not isinstance(manual, list):
-        raise ContractError("Population manifest needs population_ids and excluded_manual_ids")
+        raise ContractError("Population manifest needs publication_ids and excluded_manual_ids")
     ids = [canonical_id(p) for p in ids]
     manual = [canonical_id(p) for p in manual]
     if len(ids) != len(set(ids)) or len(manual) != len(set(manual)) or not set(manual) <= set(ids):
@@ -47,7 +47,12 @@ def select_pool(population_path: Path, ranges_path: Path, output: Path, *, seed:
         if paper not in manual:
             buckets[_owner(paper, ranges)].append(paper)
     minimum = max(math.ceil(sum(map(len, buckets.values())) * 0.1), 10)
-    base, extra = divmod(minimum, len(buckets))
+    target = minimum if target_count is None else target_count
+    if type(target) is not int or target < minimum or target > sum(map(len, buckets.values())):
+        raise ContractError(f"target_count must be between {minimum} and the non-manual population size")
+    if type(reserve_per_member) is not int or reserve_per_member < 0:
+        raise ContractError("reserve_per_member must be a nonnegative integer")
+    base, extra = divmod(target, len(buckets))
     selected, reserves = {}, {}
     for i, (member, values) in enumerate(buckets.items()):
         ordered = sorted(values, key=lambda p: (hashlib.sha256(f"{seed}:{p}".encode()).hexdigest(), p))
@@ -60,7 +65,9 @@ def select_pool(population_path: Path, ranges_path: Path, output: Path, *, seed:
                   selection_method="sha256(seed:arxiv_id), balanced across five assigned ranges",
                   population_sha256=_digest(population_path), population_count=len(ids),
                   manual_count=len(manual), non_manual_count=sum(map(len, buckets.values())),
-                  minimum_auto_count=minimum, selected=selected, reserves=reserves,
+                  minimum_auto_count=minimum, target_auto_count=target,
+                  population_snapshot_id=population.get("population_snapshot_id"),
+                  selected=selected, reserves=reserves,
                   range_source=str(ranges_path.name))
     output.parent.mkdir(parents=True, exist_ok=True)
     atomic_json(output, result)
