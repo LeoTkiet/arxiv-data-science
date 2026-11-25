@@ -38,7 +38,7 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 class HeuristicPolicy:
     """Configurable thresholds and policy for high-precision heuristic labeling."""
 
-    heuristic_version: str = "v1.2.0"
+    heuristic_version: str = "v1.3.0"
     exact_title_threshold: float = 0.96
     high_title_threshold: float = 0.84
     no_match_title_threshold: float = 0.25
@@ -101,8 +101,13 @@ def extract_author_last_names(authors: Iterable[str] | None) -> set[str]:
         if not author:
             continue
         tokens_all = _NON_ALNUM_RE.sub(" ", author).split()
-        if not tokens_all or any(token in _AUTHOR_NOISE for token in tokens_all):
+        if not tokens_all or any(token in {"collaboration", "collaborators", "group", "consortium"} for token in tokens_all):
             continue
+        # "Xin Suo et al." names the first author; keep Suo rather than
+        # discarding the whole field or treating "al" as a surname.
+        if len(tokens_all) >= 3 and tokens_all[-2:] == ["et", "al"]:
+            tokens_all = tokens_all[:-2]
+            author = " ".join(tokens_all)
         if "," in author:
             surname_part = author.split(",", 1)[0].strip()
             tokens = _NON_ALNUM_RE.sub(" ", surname_part).split()
@@ -192,9 +197,9 @@ def _label_single_query(
     bib_title_norm = normalize_title(bib.title)
     bib_surnames = extract_author_last_names(bib.authors)
 
-    # Rule 1: Explicit arXiv ID in doi / url / journal
+    # Rule 1: Explicit arXiv ID in doi / url / journal / citation key
     explicit_ids: set[str] = set()
-    for field in (bib.doi, bib.url, bib.journal):
+    for field in (bib.doi, bib.url, bib.journal, bib.citation_key):
         explicit_ids.update(extract_arxiv_ids(field))
 
     ref_by_id = {canonical_id(r.ref_arxiv_id): r for r in references}

@@ -32,6 +32,7 @@ def test_normalize_title_and_extract_helpers():
     assert extract_arxiv_ids("https://arxiv.org/abs/hep-th/9901001v1") == ["hep-th/9901001"]
     assert extract_author_last_names(["Vaswani, Ashish", "Noam Shazeer"]) == {"vaswani", "shazeer"}
     assert extract_author_last_names(["ATLAS Collaboration", "The CMS Collaboration", "others"]) == set()
+    assert extract_author_last_names(["Xin Suo et al."]) == {"suo"}
 
 
 def test_pilot_typo_matches_without_accepting_related_but_different_papers():
@@ -128,11 +129,24 @@ def test_auto_label_matches_explicit_arxiv_id_from_doi_or_url():
     assert labels[0].confidence == 0.99
     assert labels[0].notes == "rule=explicit_arxiv_id"
     assert labels[0].label_source == "heuristic"
-    assert labels[0].heuristic_version == "v1.2.0"
+    assert labels[0].heuristic_version == "v1.3.0"
 
     assert labels[1].decision == "matched"
     assert labels[1].groundtruth_arxiv_id == "1810.04805"
     assert validate_labels([b], labels).valid
+
+
+def test_citation_key_arxiv_id_requires_unique_candidate_and_title_consistency():
+    paper = "2401.00005"
+    bib = dict(arxiv_id=paper, citation_key="arXiv:2001.00001",
+               entry_type="article", title="A distinct paper", authors=["Alice Smith"],
+               year=2020, doi=None, journal=None, url=None)
+    ref = dict(arxiv_id=paper, ref_arxiv_id="2001.00001", ref_title="A distinct paper",
+               ref_authors=["Alice Smith"], ref_submission_date="2020-01-01")
+    label = auto_label([_bundle(paper, [bib], [ref])])[0]
+    assert (label.decision, label.groundtruth_arxiv_id) == ("matched", "2001.00001")
+    conflict = auto_label([_bundle(paper, [dict(bib, title="Completely unrelated work")], [ref])])[0]
+    assert conflict.decision == "uncertain"
 
 
 def test_auto_label_matches_normalized_title_and_abstains_on_author_mismatch():
