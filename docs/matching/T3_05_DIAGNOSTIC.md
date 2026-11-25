@@ -19,6 +19,17 @@ Mở `colab/MS3_T3_05_Auto_Pool_Diagnostic_CPU.ipynb`:
    quả này mới quyết định mở rộng pool, cải thiện rule có chứng cứ hoặc cần
    review thủ công.
 
+Để đo trên phạm vi rộng hơn, cell 3 hiện lấy mẫu phân tầng tối đa **800 bài
+mỗi TV** theo độ đầy đủ title/authors và số BibTeX. Không chọn riêng các hàng
+metadata tốt nhất; mục tiêu là pilot ít thiên lệch hơn, không phải cam kết đạt
+quota. Nếu chỉ một số strata đạt, xem `candidate_scan.json` trước khi chuẩn bị
+mọi bundle.
+
+Cell 4 xuất tới 100 dòng spot-check xác định theo seed/hash, tối đa 20 mỗi tổ
+`member × rule`. Đây là **mẫu cần người xác minh**, không phải nhãn chuẩn. Chỉ
+tính precision sau khi điền kết quả kiểm tra độc lập; không tính recall từ mẫu
+accepted đơn thuần vì chưa có nhãn gold cho các unmatched và uncertain.
+
 Kết quả nằm ở `T3-05/output/diagnostic/`: `candidate_scan.json`,
 `pilot_selection.json`, `prepared/prepared_manifest.json`,
 `first_pass/first_pass_manifest.json` và nhãn nháp. Pilot **không được bàn giao

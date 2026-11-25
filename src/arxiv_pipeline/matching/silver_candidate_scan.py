@@ -1,4 +1,4 @@
-"""Rank additional T3-05 publications by observable MS2 BibTeX completeness."""
+"""Sample additional T3-05 publications by observable MS2 BibTeX completeness."""
 from __future__ import annotations
 
 import hashlib
@@ -17,7 +17,7 @@ def _read(path: Path):
 def scan_candidates(population_path: Path, selection_path: Path, roots_path: Path,
                     ranges_path: Path, output: Path, *, pilot_per_member: int = 100,
                     seed: int = 42) -> dict:
-    """Scan unselected BibTeX metadata and create a quality-enriched pilot.
+    """Scan unselected BibTeX metadata and create a stratified random pilot.
 
     The pilot is diagnostic; its IDs are not automatically accepted labels.
     """
@@ -45,7 +45,7 @@ def scan_candidates(population_path: Path, selection_path: Path, roots_path: Pat
         by_member[owners[0]].append(paper)
 
     report = dict(task="T3-05", phase="additional_candidate_scan", seed=seed,
-                  selection_method="pilot ranked by BibTeX title/author completeness and entry count",
+                  selection_method="stratified deterministic sample across metadata completeness and BibTeX count",
                   source_selection_count=len(selected), members={}, scan_errors={})
     pilot = {}
     for member, papers in by_member.items():
@@ -53,6 +53,7 @@ def scan_candidates(population_path: Path, selection_path: Path, roots_path: Pat
         if ms2_path.suffix.lower() != ".zip":
             raise ContractError(f"Candidate scan expects MS2_RESULTS.zip for {member}")
         candidates = []
+        scan_errors = 0
         with ZipSnapshot(ms2_path) as archive:
             for paper in papers:
                 try:
@@ -61,6 +62,7 @@ def scan_candidates(population_path: Path, selection_path: Path, roots_path: Pat
                         raise ValueError("BibTeX table is not a list")
                 except (FileNotFoundError, ValueError, UnicodeError, KeyError) as exc:
                     report["scan_errors"][paper] = str(exc)
+                    scan_errors += 1
                     continue
                 count = len(raw)
                 if count == 0:
@@ -71,13 +73,32 @@ def scan_candidates(population_path: Path, selection_path: Path, roots_path: Pat
                         -count, hashlib.sha256(f"{seed}:{paper}".encode()).hexdigest())
                 candidates.append((rank, dict(arxiv_id=paper, bibtex_count=count,
                                               titles_present=titles, authors_present=authors)))
-        candidates.sort(key=lambda item: item[0], reverse=True)
         if len(candidates) < pilot_per_member:
             raise ContractError(f"Only {len(candidates)} nonempty candidates for {member}")
-        top = [row for _, row in candidates[:pilot_per_member]]
+        strata = {}
+        for rank, row in candidates:
+            key = (row["titles_present"] == row["bibtex_count"],
+                   row["authors_present"] == row["bibtex_count"],
+                   min(row["bibtex_count"] // 10, 5))
+            strata.setdefault(key, []).append((rank, row))
+        for items in strata.values():
+            items.sort(key=lambda item: hashlib.sha256(
+                f"{seed}:{member}:{item[1]['arxiv_id']}".encode()).hexdigest())
+        ordered_strata = sorted(strata.items(), key=lambda item: item[0])
+        sampled = []
+        while len(sampled) < pilot_per_member:
+            progressed = False
+            for _, items in ordered_strata:
+                if items and len(sampled) < pilot_per_member:
+                    sampled.append(items.pop(0))
+                    progressed = True
+            if not progressed:
+                break
+        top = [row for _, row in sampled]
         pilot[member] = [row["arxiv_id"] for row in top]
         report["members"][member] = dict(scanned=len(papers), nonempty=len(candidates),
-                                         pilot=len(top), pilot_metadata=top)
+                                         scan_errors=scan_errors, pilot=len(top),
+                                         strata_count=len(strata), pilot_metadata=top)
         print(f"{member}: scanned {len(papers)}, nonempty {len(candidates)}, pilot {len(top)}")
 
     output = Path(output)

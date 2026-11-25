@@ -165,10 +165,10 @@ def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
                 bucket = row["member"], rule
                 rank = hashlib.sha256(f'{paper}:{label.citation_key}'.encode()).hexdigest()
                 current = spot_check_candidates.setdefault(bucket, [])
-                if len(current) < 3 or rank < current[-1][0]:
+                if len(current) < 20 or rank < current[-1][0]:
                     current.append((rank, _review_context(bundle, label, row["member"])))
                     current.sort(key=lambda item: item[0])
-                    del current[3:]
+                    del current[20:]
         if index % progress_every == 0 or index == len(ready):
             print(f"Heuristic: {index}/{len(ready)} ready publications; "
                   f"full coverage candidates: {candidate_full_coverage}; uncertain: {len(uncertain)}")
@@ -192,7 +192,9 @@ def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
                    full_coverage_without_references=full_without_references,
                    full_coverage_with_match=full_with_match,
                    uncertain_entries=len(uncertain), uncertain_reason_counts=uncertain_reason_counts,
-                   spot_check_sample_count=len(sample), decision_counts=decision_counts,
+                   spot_check_sample_count=len(sample), spot_check_sample_target=100,
+                   spot_check_sample_method="deterministic random sample stratified by member and rule; up to 20 per stratum",
+                   decision_counts=decision_counts,
                    rule_counts=rule_counts, publications=publications,
                    ready_for_handoff=False,
                    next_step="Resolve uncertain rows, spot-check accepted rules, then finalize and validate the auto pool")
