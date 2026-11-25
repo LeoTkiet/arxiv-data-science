@@ -129,7 +129,7 @@ def test_auto_label_matches_explicit_arxiv_id_from_doi_or_url():
     assert labels[0].confidence == 0.99
     assert labels[0].notes == "rule=explicit_arxiv_id"
     assert labels[0].label_source == "heuristic"
-    assert labels[0].heuristic_version == "v1.3.0"
+    assert labels[0].heuristic_version == "v1.4.0"
 
     assert labels[1].decision == "matched"
     assert labels[1].groundtruth_arxiv_id == "1810.04805"

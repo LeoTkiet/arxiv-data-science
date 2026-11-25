@@ -38,7 +38,7 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 class HeuristicPolicy:
     """Configurable thresholds and policy for high-precision heuristic labeling."""
 
-    heuristic_version: str = "v1.3.0"
+    heuristic_version: str = "v1.4.0"
     exact_title_threshold: float = 0.96
     high_title_threshold: float = 0.84
     no_match_title_threshold: float = 0.25
@@ -60,6 +60,10 @@ def normalize_title(title: str | None) -> str:
     if not title:
         return ""
     cleaned = title
+    # Compact only explicit TeX subscripts, preserving their values. This makes
+    # G_0W_0 and G0W0 comparable without removing other mathematical operators.
+    cleaned = re.sub(r"(?<=[A-Za-z0-9])_\s*\{([A-Za-z0-9]+)\}", r"\1", cleaned)
+    cleaned = re.sub(r"(?<=[A-Za-z0-9])_([A-Za-z0-9])", r"\1", cleaned)
     for _ in range(3):
         updated = _LATEX_WRAPPER_RE.sub(r" \1 ", cleaned)
         if updated == cleaned:
