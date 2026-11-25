@@ -31,6 +31,7 @@ def test_normalize_title_and_extract_helpers():
     assert extract_arxiv_ids("10.48550/arXiv.2310.12345v2") == ["2310.12345"]
     assert extract_arxiv_ids("https://arxiv.org/abs/hep-th/9901001v1") == ["hep-th/9901001"]
     assert extract_author_last_names(["Vaswani, Ashish", "Noam Shazeer"]) == {"vaswani", "shazeer"}
+    assert extract_author_last_names(["ATLAS Collaboration", "The CMS Collaboration", "others"]) == set()
 
 
 def test_pilot_typo_matches_without_accepting_related_but_different_papers():
@@ -127,7 +128,7 @@ def test_auto_label_matches_explicit_arxiv_id_from_doi_or_url():
     assert labels[0].confidence == 0.99
     assert labels[0].notes == "rule=explicit_arxiv_id"
     assert labels[0].label_source == "heuristic"
-    assert labels[0].heuristic_version == "v1.1.0"
+    assert labels[0].heuristic_version == "v1.2.0"
 
     assert labels[1].decision == "matched"
     assert labels[1].groundtruth_arxiv_id == "1810.04805"
@@ -272,6 +273,25 @@ def test_auto_label_clear_no_match_and_year_conflict_and_summary():
     assert summary["publication_count"] == 1
     assert summary["by_decision"] == {"matched": 0, "unmatched": 1, "uncertain": 1}
     assert summary["coverage_non_uncertain"] == 0.5
+
+
+def test_exact_title_resolves_when_bibtex_year_is_malformed():
+    paper = "2401.00004"
+    bundle = _bundle(
+        paper,
+        [dict(arxiv_id=paper, citation_key="bad_year", entry_type="article",
+              title="Bonsai: Diverse and shallow trees for extreme multi-label classification",
+              authors=["Sujay Khandagale", "Han Xiao", "Rohit Babbar"], year=2099,
+              doi=None, journal=None, url=None)],
+        [dict(arxiv_id=paper, ref_arxiv_id="1904.08249",
+              ref_title="Bonsai: diverse and shallow trees for extreme multi-label classification",
+              ref_authors=["Sujay Khandagale", "Han Xiao", "Rohit Babbar"],
+              ref_submission_date="2019-04-17")],
+    )
+    label = auto_label([bundle])[0]
+    assert label.decision == "matched"
+    assert label.groundtruth_arxiv_id == "1904.08249"
+    assert label.notes == "rule=exact_normalized_title"
 
 
 def test_auto_label_rejects_non_ready_or_duplicate_bundles():

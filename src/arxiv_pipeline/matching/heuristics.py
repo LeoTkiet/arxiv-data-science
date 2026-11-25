@@ -29,6 +29,7 @@ _OLD_ARXIV_ID_RE = re.compile(
     re.I,
 )
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+_AUTHOR_NOISE = {"others", "et", "al", "collaboration", "collaborators", "group", "consortium"}
 _LATEX_WRAPPER_RE = re.compile(r"\\[a-zA-Z]+\s*\{([^{}]*)\}")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 
@@ -37,7 +38,7 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 class HeuristicPolicy:
     """Configurable thresholds and policy for high-precision heuristic labeling."""
 
-    heuristic_version: str = "v1.1.0"
+    heuristic_version: str = "v1.2.0"
     exact_title_threshold: float = 0.96
     high_title_threshold: float = 0.84
     no_match_title_threshold: float = 0.25
@@ -98,14 +99,17 @@ def extract_author_last_names(authors: Iterable[str] | None) -> set[str]:
         author = _strip_accents(raw).replace("{", "").replace("}", "").strip().lower()
         if not author:
             continue
+        tokens_all = _NON_ALNUM_RE.sub(" ", author).split()
+        if not tokens_all or any(token in _AUTHOR_NOISE for token in tokens_all):
+            continue
         if "," in author:
             surname_part = author.split(",", 1)[0].strip()
             tokens = _NON_ALNUM_RE.sub(" ", surname_part).split()
-            if tokens:
+            if tokens and tokens[-1] not in _AUTHOR_NOISE:
                 surnames.add(tokens[-1])
         else:
             tokens = _NON_ALNUM_RE.sub(" ", author).split()
-            if tokens:
+            if tokens and tokens[-1] not in _AUTHOR_NOISE:
                 surnames.add(tokens[-1])
     return surnames
 
@@ -134,7 +138,7 @@ def title_similarity(norm_a: str, norm_b: str) -> float:
 
 
 def _has_year_conflict(bib_year: int | None, ref_date: str | None, max_diff: int) -> bool:
-    if bib_year is None:
+    if bib_year is None or not 1900 <= bib_year <= 2100:
         return False
     ref_year = extract_submission_year(ref_date)
     if ref_year is None:
@@ -275,7 +279,10 @@ def _label_single_query(
                     notes="rule=title_match_author_mismatch",
                 )
 
-            if best_year_conflict:
+            authors_match = bool(bib_surnames and best_ref_surnames and best_overlap > 0)
+            exact_title_authors = is_exact and authors_match
+            malformed_bib_year = bib.year is not None and not 1900 <= bib.year <= 2026
+            if best_year_conflict and not (exact_title_authors and malformed_bib_year):
                 return _make_record(
                     bib,
                     groundtruth_arxiv_id=None,
