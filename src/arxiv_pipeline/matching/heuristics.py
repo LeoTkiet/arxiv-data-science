@@ -42,6 +42,7 @@ class HeuristicPolicy:
     exact_title_threshold: float = 0.96
     high_title_threshold: float = 0.84
     no_match_title_threshold: float = 0.25
+    arxiv_id_title_conflict_threshold: float = 0.25
     min_title_chars_for_exact: int = 8
     min_margin_over_second: float = 0.10
     max_year_diff: int = 3
@@ -201,7 +202,7 @@ def _label_single_query(
     if len(id_matches) == 1:
         matched_ref = id_matches[0]
         ref_title_norm = normalize_title(matched_ref.ref_title)
-        if bib_title_norm and ref_title_norm and title_similarity(bib_title_norm, ref_title_norm) < policy.no_match_title_threshold:
+        if bib_title_norm and ref_title_norm and title_similarity(bib_title_norm, ref_title_norm) < policy.arxiv_id_title_conflict_threshold:
             return _make_record(
                 bib,
                 groundtruth_arxiv_id=None,

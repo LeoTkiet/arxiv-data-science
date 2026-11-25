@@ -64,7 +64,8 @@ def _review_context(bundle, label, member: str) -> dict:
 
 
 def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
-                   *, progress_every: int = 100) -> dict:
+                   *, progress_every: int = 100,
+                   policy: HeuristicPolicy | None = None) -> dict:
     """Generate draft labels; never treat abstentions as accepted or handoff ready."""
     prepared_path, population_path, output = Path(prepared_path), Path(population_path), Path(output)
     prepared, population = _read(prepared_path), _read(population_path)
@@ -88,7 +89,7 @@ def run_first_pass(prepared_path: Path, population_path: Path, output: Path,
     if type(progress_every) is not int or progress_every < 1:
         raise ContractError("progress_every must be a positive integer")
 
-    policy = HeuristicPolicy(accept_clear_decisions=True)
+    policy = policy or HeuristicPolicy(accept_clear_decisions=True)
     policy_config = asdict(policy)
     policy_key = hashlib.sha256(json.dumps(policy_config, sort_keys=True).encode()).hexdigest()
     output.mkdir(parents=True, exist_ok=True)
