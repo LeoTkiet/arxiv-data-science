@@ -8,7 +8,7 @@ from pathlib import Path
 
 from arxiv_pipeline.common.utils import atomic_json
 from arxiv_pipeline.matching.contracts import ContractError, canonical_id
-from arxiv_pipeline.matching.io import load_with_provenance
+from arxiv_pipeline.matching.io import ZipSnapshot, load_with_provenance, ms2_snapshot_path
 
 
 def _read(path: Path) -> dict:
@@ -85,27 +85,37 @@ def prepare_pool(selection_path: Path, roots_path: Path, output: Path) -> dict:
         context = roots.get(member)
         if not isinstance(context, dict) or not {"ms1_root", "ms2_root"} <= context.keys():
             raise ContractError(f"Missing MS1/MS2 roots for {member}")
-        for paper in papers:
-            target = output / "bundles" / member / f"{paper}.json"
-            receipt = output / "receipts" / member / f"{paper}.json"
-            if target.is_file() and receipt.is_file():
-                prior = _read(receipt)
-                if prior.get("sha256") == _digest(target) and prior.get("arxiv_id") == paper:
-                    records.append(prior)
+        context = dict(context)
+        ms2_path = ms2_snapshot_path(Path(context["ms2_root"]))
+        context["ms2_root"] = str(ms2_path)
+        archive = ZipSnapshot(ms2_path) if ms2_path.suffix.lower() == '.zip' else None
+        if archive is not None:
+            context["_ms2_archive"] = archive
+        try:
+            for paper in papers:
+                target = output / "bundles" / member / f"{paper}.json"
+                receipt = output / "receipts" / member / f"{paper}.json"
+                if target.is_file() and receipt.is_file():
+                    prior = _read(receipt)
+                    if prior.get("sha256") == _digest(target) and prior.get("arxiv_id") == paper:
+                        records.append(prior)
+                        continue
+                loaded = load_with_provenance(paper, context)
+                if loaded.bundle.readiness != "ready":
+                    records.append(dict(member=member, arxiv_id=paper, status="not_ready",
+                                        issues=[i.to_dict() for i in loaded.bundle.issues]))
                     continue
-            loaded = load_with_provenance(paper, context)
-            if loaded.bundle.readiness != "ready":
-                records.append(dict(member=member, arxiv_id=paper, status="not_ready",
-                                    issues=[i.to_dict() for i in loaded.bundle.issues]))
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            receipt.parent.mkdir(parents=True, exist_ok=True)
-            atomic_json(target, loaded.bundle.to_dict())
-            row = dict(member=member, arxiv_id=paper, status="ready", bundle=str(target.relative_to(output)),
-                       sha256=_digest(target), bibtex_count=len(loaded.bundle.bibtex),
-                       reference_count=len(loaded.bundle.references), provenance=loaded.provenance)
-            atomic_json(receipt, row)
-            records.append(row)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                receipt.parent.mkdir(parents=True, exist_ok=True)
+                atomic_json(target, loaded.bundle.to_dict())
+                row = dict(member=member, arxiv_id=paper, status="ready", bundle=str(target.relative_to(output)),
+                           sha256=_digest(target), bibtex_count=len(loaded.bundle.bibtex),
+                           reference_count=len(loaded.bundle.references), provenance=loaded.provenance)
+                atomic_json(receipt, row)
+                records.append(row)
+        finally:
+            if archive is not None:
+                archive.close()
     summary = dict(task="T3-05", selection_sha256=_digest(selection_path),
                    total=len(records), ready=sum(r.get("status") == "ready" for r in records),
                    not_ready=sum(r.get("status") != "ready" for r in records), publications=records)

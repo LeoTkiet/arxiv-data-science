@@ -12,12 +12,14 @@ không ready. Manifest có các key `publication_ids`, `population_count`,
 
 - `population_manifest.json` trong gói T3-05, gồm `publication_ids` và
   `excluded_manual_ids`. File dữ liệu thật nằm ngoài Git.
-- Năm thư mục MS1 `data/` và năm thư mục MS2 đã giải nén từ kết quả cuối.
-  `roots.json` có dạng:
+- Năm thư mục MS1 `data/` và năm thư mục MS2 `tv1`–`tv5` chứa
+  `MS2_RESULTS.zip`. Không cần giải nén. Notebook tự tạo `roots.json` nếu
+  hai folder `arxiv_ms1_data` và `arxiv_ms2_result` đã có trong MyDrive.
+  Có thể tự cấp đường dẫn khác trong `roots.json` dạng:
 
 ```json
 {
-  "tv1": {"ms1_root": "/content/drive/MyDrive/arxiv_ms1_data/tv1/data", "ms2_root": "/content/drive/MyDrive/arxiv_ms2_results/tv1"},
+  "tv1": {"ms1_root": "/content/drive/MyDrive/arxiv_ms1_data/tv1/data", "ms2_root": "/content/drive/MyDrive/arxiv_ms2_result/tv1"},
   "tv2": {"ms1_root": ".../tv2/data", "ms2_root": ".../tv2"},
   "tv3": {"ms1_root": ".../tv3/data", "ms2_root": ".../tv3"},
   "tv4": {"ms1_root": ".../tv4/data", "ms2_root": ".../tv4"},
@@ -25,9 +27,11 @@ không ready. Manifest có các key `publication_ids`, `population_count`,
 }
 ```
 
-Điền đường dẫn **thực tế sau giải nén**, nơi có `state/` và `tables/` cho MS2;
-không điền URL Drive hoặc đường dẫn tới ZIP. MS1 root phải có `state/` và
-`references/`. Input được đọc, không sửa.
+`ms2_root` có thể là folder chứa đúng một ZIP, đường dẫn trực tiếp tới ZIP,
+hoặc folder đã có `state/` và `tables/`. MS1 root phải có `state/` và
+`references/`. Với dữ liệu ở mục **Được chia sẻ với tôi**, cần thêm shortcut
+vào MyDrive để Colab thấy folder; chỉ dán URL Drive không tạo đường dẫn file.
+Input được đọc, không sửa.
 
 ## Chạy
 
