@@ -224,5 +224,7 @@ __marimo__/
 /outputs/
 /demo-output/
 /artifacts/
+# Root-level scratch files from local T3-05 diagnostics
+/temp_*
 *.egg-info/
 *.patch
