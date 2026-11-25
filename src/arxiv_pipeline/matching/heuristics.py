@@ -37,9 +37,9 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 class HeuristicPolicy:
     """Configurable thresholds and policy for high-precision heuristic labeling."""
 
-    heuristic_version: str = "v1.0.0"
+    heuristic_version: str = "v1.1.0"
     exact_title_threshold: float = 0.96
-    high_title_threshold: float = 0.88
+    high_title_threshold: float = 0.84
     no_match_title_threshold: float = 0.25
     min_title_chars_for_exact: int = 8
     min_margin_over_second: float = 0.10

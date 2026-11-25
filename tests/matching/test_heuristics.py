@@ -33,6 +33,47 @@ def test_normalize_title_and_extract_helpers():
     assert extract_author_last_names(["Vaswani, Ashish", "Noam Shazeer"]) == {"vaswani", "shazeer"}
 
 
+def test_pilot_typo_matches_without_accepting_related_but_different_papers():
+    paper = "2506.19423"
+    bundle = _bundle(
+        paper,
+        [
+            dict(arxiv_id=paper, citation_key="KloKuw", entry_type="article",
+                 title="Explicit sections on Kuwata's elliptic surfaces",
+                 authors=["R. Kloosterman"], year=2005, doi=None, journal=None, url=None),
+            dict(arxiv_id=paper, citation_key="Bartosz", entry_type="article",
+                 title="Geometry of the del Pezzo surface $y^2 = x^3 + A m^6 + B n^6$",
+                 authors=["J. Desjardins", "B. Naskr\\kecki"], year=2024,
+                 doi=None, journal=None, url=None),
+        ],
+        [
+            dict(arxiv_id=paper, ref_arxiv_id="math/0502017",
+                 ref_title="Explicit sectons on Kuwata's elliptic surfaces",
+                 ref_authors=["R. Kloosterman"], ref_submission_date="2005-02-01"),
+            dict(arxiv_id=paper, ref_arxiv_id="1911.02684",
+                 ref_title="Geometry of the del Pezzo surface y^2=x^3+Am^6+Bn^6",
+                 ref_authors=["J. Desjardins", "B. Naskrȩcki"],
+                 ref_submission_date="2019-11-07"),
+        ],
+    )
+    matched, conflict = auto_label([bundle])
+    assert (matched.decision, matched.groundtruth_arxiv_id) == ("matched", "math/0502017")
+    assert conflict.decision == "uncertain"
+
+    related = _bundle(
+        "2411.08799",
+        [dict(arxiv_id="2411.08799", citation_key="el", entry_type="article",
+              title="Number of prime factors with a given multiplicity",
+              authors=["E. Elma", "Y.-R. Liu"], year=2022,
+              doi=None, journal=None, url=None)],
+        [dict(arxiv_id="2411.08799", ref_arxiv_id="2406.04574",
+              ref_title="Distribution of the number of prime factors with a given multiplicity",
+              ref_authors=["Ertan Elma", "Greg Martin"],
+              ref_submission_date="2024-06-07")],
+    )
+    assert auto_label([related])[0].decision == "uncertain"
+
+
 def test_auto_label_matches_explicit_arxiv_id_from_doi_or_url():
     b = _bundle(
         "2401.00001",
@@ -86,7 +127,7 @@ def test_auto_label_matches_explicit_arxiv_id_from_doi_or_url():
     assert labels[0].confidence == 0.99
     assert labels[0].notes == "rule=explicit_arxiv_id"
     assert labels[0].label_source == "heuristic"
-    assert labels[0].heuristic_version == "v1.0.0"
+    assert labels[0].heuristic_version == "v1.1.0"
 
     assert labels[1].decision == "matched"
     assert labels[1].groundtruth_arxiv_id == "1810.04805"

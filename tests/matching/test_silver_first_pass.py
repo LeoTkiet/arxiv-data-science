@@ -48,6 +48,13 @@ def test_first_pass_reports_full_coverage_and_uncertain_without_handoff(tmp_path
     assert {row["review_status"] for row in labels} == {"accepted", "pending"}
     uncertain = json.loads((output / "uncertain_rows.json").read_text())
     assert uncertain[0]["arxiv_id"] == records[1]["arxiv_id"]
+    details = json.loads((output / "uncertain_details.json").read_text())
+    assert len(details) == 1
+    assert details[0]["citation_key"] == uncertain[0]["citation_key"]
+    assert details[0]["candidates"]
+    sample = json.loads((output / "spot_check_sample.json").read_text())
+    assert len(sample) == summary["spot_check_sample_count"] == 1
+    assert sample[0]["decision"] == "matched"
     assert run_first_pass(prepared, population, output)["total_labels"] == 2
 
 
