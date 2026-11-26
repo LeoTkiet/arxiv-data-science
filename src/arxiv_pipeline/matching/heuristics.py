@@ -52,6 +52,11 @@ class HeuristicPolicy:
     min_margin_over_second: float = 0.10
     max_year_diff: int = 3
     title_similarity_method: str = "hybrid_sequence_jaccard"
+    decision_mode: str = "conservative"
+    match_score_threshold: float = 0.72
+    title_score_weight: float = 0.70
+    author_score_weight: float = 0.25
+    year_score_weight: float = 0.05
     accept_clear_decisions: bool = False
 
 
@@ -233,6 +238,15 @@ def _label_single_query(
     id_matches = [ref_by_id[cid] for cid in explicit_ids if cid in ref_by_id]
     if len(id_matches) == 1:
         matched_ref = id_matches[0]
+        if policy.decision_mode == "binary_calibrated":
+            return _make_record(
+                bib,
+                groundtruth_arxiv_id=canonical_id(matched_ref.ref_arxiv_id),
+                decision="matched",
+                confidence=0.99,
+                policy=policy,
+                notes="rule=calibrated_explicit_arxiv_id",
+            )
         ref_title_norm = normalize_title(matched_ref.ref_title)
         if (bib_title_norm and ref_title_norm and title_similarity(
                 bib_title_norm, ref_title_norm, policy.title_similarity_method
@@ -282,6 +296,65 @@ def _label_single_query(
         max_raw_sim = max(max_raw_sim, sim)
         max_author_overlap = max(max_author_overlap, overlap)
         scored.append((sim, overlap, year_conflict, ref, ref_title_norm))
+
+    if policy.decision_mode == "binary_calibrated":
+        if policy.title_similarity_method not in {"hybrid_sequence_jaccard", "char_3gram_cosine"}:
+            raise ContractError("Unsupported title similarity method for binary policy")
+        weights = (
+            policy.title_score_weight,
+            policy.author_score_weight,
+            policy.year_score_weight,
+        )
+        if any(weight < 0 for weight in weights) or not abs(sum(weights) - 1.0) < 1e-9:
+            raise ContractError("Binary policy weights must be non-negative and sum to 1")
+        if not 0.0 <= policy.match_score_threshold <= 1.0:
+            raise ContractError("match_score_threshold must be in [0, 1]")
+
+        def calibrated_score(item):
+            sim, overlap, _, ref, ref_title_norm = item
+            ref_surnames = extract_author_last_names(ref.ref_authors)
+            author_jaccard = (
+                len(bib_surnames & ref_surnames) / len(bib_surnames | ref_surnames)
+                if bib_surnames and ref_surnames else 0.0
+            )
+            ref_year = extract_submission_year(ref.ref_submission_date)
+            if bib.year is not None and ref_year is not None:
+                year_score = max(0.0, 1.0 - abs(int(bib.year) - ref_year) / 6.0)
+            else:
+                year_score = 0.5
+            score = (
+                policy.title_score_weight * sim
+                + policy.author_score_weight * author_jaccard
+                + policy.year_score_weight * year_score
+            )
+            return score, overlap, ref
+
+        ranked = sorted(
+            (calibrated_score(item) for item in scored),
+            key=lambda item: (item[0], item[1]),
+            reverse=True,
+        )
+        best_score, _, best_ref = ranked[0]
+        if best_score >= policy.match_score_threshold:
+            return _make_record(
+                bib,
+                groundtruth_arxiv_id=canonical_id(best_ref.ref_arxiv_id),
+                decision="matched",
+                confidence=best_score,
+                policy=policy,
+                notes="rule=calibrated_multisignal_match",
+            )
+        return _make_record(
+            bib,
+            groundtruth_arxiv_id=None,
+            decision="unmatched",
+            confidence=1.0 - best_score,
+            policy=policy,
+            notes="rule=calibrated_multisignal_unmatched",
+        )
+
+    if policy.decision_mode != "conservative":
+        raise ContractError(f"Unsupported decision_mode: {policy.decision_mode}")
 
     scored.sort(key=lambda item: (item[0], item[1], not item[2]), reverse=True)
     best_sim, best_overlap, best_year_conflict, best_ref, best_ref_title = scored[0]
