@@ -184,7 +184,7 @@ def test_lambdamart_groups_survive_shuffled_rows(data):
     assert [s.score for s in predict_scores(a, va)] == [s.score for s in predict_scores(b, va)]
 
 
-def test_feature_groups_match_tv2_schema():
+def test_feature_groups_match_feature_schema():
     from arxiv_pipeline.matching.analysis import FEATURE_GROUPS, MOCK_GROUPS, resolve_groups
     official = [c for g in FEATURE_GROUPS.values() for c in g]
     assert len(official) == len(set(official)) == 16
@@ -308,3 +308,11 @@ def test_unfingerprinted_artifact_is_not_reused(data, tmp_path):
     save_artifact(legacy, tmp_path)
     with pytest.raises(ContractError, match="no data fingerprint"):
         save_artifact(legacy, tmp_path)
+
+
+def test_grid_params_can_override_estimator_defaults(data):
+    """Real-data grids set n_jobs; it must override, not collide with, the default."""
+    _, _, _, tr, tr_t, va, va_t = data
+    art = fit_model(tr, tr_t, va, va_t, dict(kind="rf", seed=0,
+                    grid=[{"n_estimators": 10, "max_samples": 0.5, "n_jobs": -1}]))
+    assert art.estimator[-1].n_jobs == -1

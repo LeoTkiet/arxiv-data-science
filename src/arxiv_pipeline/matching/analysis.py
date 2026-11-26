@@ -1,18 +1,8 @@
-"""TV4 error analysis (T4-04): ablation, importance, slices, error cases.
+"""Error analysis: feature-group ablation, permutation importance, slices, error cases.
 
-Everything here runs on train/valid only; test stays untouched until the model
-config is frozen. Runs on mock data today:
+Runs on train/valid only; test stays untouched until the model is frozen.
+Real data goes through `matching.runner`; a synthetic smoke run is available:
     python -m arxiv_pipeline.matching.analysis --mock
-
-TODO(T4-04, blocked on real data):
-- Official TV2 group names are wired in (FEATURE_GROUPS); re-check if TV2's
-  schema changes after PR #24 merges.
-- Swap mrr_at_5 for TV5's official evaluator (T5-02) and confirm how labeled
-  "unmatched" entries count in MRR@5.
-- Add slices on real metadata: missing DOI/title, entry_type, publication size,
-  manual vs auto pool, hierarchy depth (if features use M2 hierarchy).
-- Error taxonomy needs bibtex/reference text joined back by key (T1-02) so
-  error cases can be read, not just counted.
 """
 
 from __future__ import annotations
@@ -23,11 +13,14 @@ import random
 from collections import Counter, defaultdict
 
 from arxiv_pipeline.matching.contracts import FeatureBatch, FeatureSchema, PairFeature
-from arxiv_pipeline.matching.model import fit_model, mrr_at_5, predict_scores
+from arxiv_pipeline.matching.model import (
+    PairMatrix, evaluator as default_evaluator, feature_columns, fit_model, predict_scores,
+)
 from arxiv_pipeline.matching.train import (
     mock_dataset, partition_batch, targets_from_labels,
 )
 
+# The 16 features of matching.features.get_feature_schema(), grouped by signal.
 FEATURE_GROUPS = {
     "title": ["title_exact_match", "title_jaccard_word", "title_levenshtein_ratio",
               "title_char_ngram_cosine", "title_len_diff_ratio"],
@@ -55,10 +48,10 @@ def resolve_groups(columns) -> dict[str, list[str]]:
     raise ValueError(f"Columns without a feature group: {sorted(cols - {c for g in FEATURE_GROUPS.values() for c in g})}")
 
 
-def _subset(batch: FeatureBatch, keep: list[str], schema=None):
+def _subset(batch, keep: list[str], schema=None):
     """Batch restricted to `keep`; with a schema, build the matching sub-schema.
 
-    Returns (batch, sub_schema). The sub-schema keeps TV2's specs and order, so
+    Returns (batch, sub_schema). The sub-schema keeps the original specs and order, so
     the batch ID equals sub_schema.schema_id and fit_model validates it.
     """
     sub = None
@@ -68,6 +61,9 @@ def _subset(batch: FeatureBatch, keep: list[str], schema=None):
         schema_id = sub.schema_id
     else:
         schema_id = f"{batch.feature_schema_id}:{','.join(keep)}"
+    if isinstance(batch, PairMatrix):
+        idx = [batch.columns.index(c) for c in keep]
+        return PairMatrix(batch.keys, batch.X[:, idx], list(keep), schema_id), sub
     rows = [PairFeature(r.arxiv_id, r.citation_key, r.ref_arxiv_id,
                         {k: r.values[k] for k in keep}) for r in batch.rows]
     return FeatureBatch(rows, schema_id), sub
@@ -87,12 +83,19 @@ def _rank_of_gold(scores, targets):
     return out
 
 
-def ablation(train, train_t, valid, valid_t, config, groups=None):
-    """Drop one feature group at a time; report valid MRR@5 delta vs all features."""
-    cols = list(train.rows[0].values)
+def ablation(train, train_t, valid, valid_t, config, groups=None, *, base_artifact=None):
+    """Drop one feature group at a time; report valid MRR@5 delta vs all features.
+
+    Works on FeatureBatch or PairMatrix. Scored with config["evaluator"] (the official
+    MRR@5 by default). `base_artifact` reuses an already-fitted full model for the
+    reference row instead of retraining it.
+    """
+    cols = feature_columns(train)
     groups = groups or resolve_groups(cols)
-    full = mrr_at_5(predict_scores(fit_model(train, train_t, valid, valid_t, config), valid),
-                    valid_t, queries=config.get("valid_queries"))
+    mrr = config.get("evaluator") or default_evaluator()
+    queries = config.get("valid_queries")
+    full_model = base_artifact or fit_model(train, train_t, valid, valid_t, config)
+    full = mrr(predict_scores(full_model, valid), valid_t, queries=queries)
     rows = [dict(dropped=None, valid_mrr_at_5=full, delta=0.0)]
     for name, group in groups.items():
         keep = [c for c in cols if c not in group]
@@ -102,16 +105,21 @@ def ablation(train, train_t, valid, valid_t, config, groups=None):
         tr, sub = _subset(train, keep, schema)
         va, _ = _subset(valid, keep, schema)
         cfg = dict(config, feature_schema=sub) if schema is not None else config
-        m = mrr_at_5(predict_scores(fit_model(tr, train_t, va, valid_t, cfg), va), valid_t,
-                     queries=config.get("valid_queries"))
+        m = mrr(predict_scores(fit_model(tr, train_t, va, valid_t, cfg), va), valid_t,
+                queries=queries)
         rows.append(dict(dropped=name, valid_mrr_at_5=m, delta=m - full))
     return rows
 
 
-def permutation_importance(artifact, valid, valid_t, *, repeats=5, seed=0):
-    """MRR@5 drop when one column is shuffled across valid rows (model-agnostic)."""
+def permutation_importance(artifact, valid, valid_t, *, repeats=5, seed=0, evaluator=None,
+                           queries=None):
+    """MRR@5 drop when one column is shuffled across valid rows (model-agnostic).
+
+    Scored with the official MRR@5 by default, like every other reported metric.
+    """
     rng = random.Random(seed)
-    base = mrr_at_5(predict_scores(artifact, valid), valid_t)
+    mrr = evaluator or default_evaluator()
+    base = mrr(predict_scores(artifact, valid), valid_t, queries=queries)
     out = {}
     for col in artifact.feature_columns:
         drops = []
@@ -120,13 +128,14 @@ def permutation_importance(artifact, valid, valid_t, *, repeats=5, seed=0):
             rng.shuffle(vals)
             rows = [PairFeature(r.arxiv_id, r.citation_key, r.ref_arxiv_id, {**r.values, col: v})
                     for r, v in zip(valid.rows, vals)]
-            drops.append(base - mrr_at_5(predict_scores(artifact, FeatureBatch(rows, valid.feature_schema_id)), valid_t))
+            shuffled = FeatureBatch(rows, valid.feature_schema_id)
+            drops.append(base - mrr(predict_scores(artifact, shuffled), valid_t, queries=queries))
         out[col] = sum(drops) / repeats
     return dict(sorted(out.items(), key=lambda kv: -kv[1]))
 
 
 # Boolean missingness/availability columns to slice on, if present in the batch
-# (TV2 official names first, synthetic mock names last).
+# (real feature names first, synthetic mock names last).
 SLICE_COLUMNS = ("is_bib_year_missing", "is_ref_year_missing", "has_doi_both",
                  "title_missing", "has_doi_match")
 
@@ -157,7 +166,7 @@ def error_cases(artifact, valid, valid_t, *, limit=20):
     """Every query whose gold is not ranked first, with a coarse reason tag.
 
     Reported systematically (all errors counted, examples listed in key order),
-    never cherry-picked. TODO(T1-02): attach bibtex/reference text for reading.
+    never cherry-picked. Rows carry keys only; join BibTeX/reference text by key to read them.
     """
     ranks = _rank_of_gold(predict_scores(artifact, valid), valid_t)
     feats = {r.key: r.values for r in valid.rows}
@@ -183,7 +192,7 @@ def error_cases(artifact, valid, valid_t, *, limit=20):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mock", action="store_true", required=True,
-                    help="Only synthetic mode until real data is handed over (TODO T4-04)")
+                    help="Synthetic smoke run; real data runs through matching.runner")
     ap.add_argument("--kind", default="logreg")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)

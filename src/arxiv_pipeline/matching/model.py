@@ -1,4 +1,4 @@
-"""TV4 matching models: fit pair scorers and return keyed scores.
+"""Matching models: fit pair scorers and return keyed scores.
 
 Contract (docs/MS3_CONTRACTS.md):
     fit_model(train_features, train_targets, valid_features, valid_targets, config) -> ModelArtifact
@@ -46,9 +46,9 @@ DEFAULT_GRIDS = {
 # --------------------------------------------------------------------------- metric
 def mrr_at_5(scores: list[ScoreRecord], targets: dict[PairKey, int], *,
              queries=None) -> float:
-    """Provisional MRR@5 following docs/MS3_CONTRACTS.md section 7.
+    """Local MRR@5 following docs/MS3_CONTRACTS.md section 7 (synthetic tests).
 
-    TV5 owns the official evaluator. Denominator = every validly labeled query:
+    Reported metrics use `evaluator()` from matching.metrics. Denominator = every validly labeled query:
     the queries present in `targets` (matched or unmatched) plus `queries`, the
     labeled query keys from the registry (needed for queries with 0 candidates,
     which have no pair targets). No-hit and unmatched queries score 0 but stay
@@ -72,8 +72,65 @@ def mrr_at_5(scores: list[ScoreRecord], targets: dict[PairKey, int], *,
     return total / len(labeled)
 
 
+def evaluator() -> Callable:
+    """Official MRR@5 (matching.metrics.score_mrr_at_5): f(scores, targets, *, queries=None)."""
+    from arxiv_pipeline.matching.metrics import score_mrr_at_5
+    return score_mrr_at_5
+
+
 # ------------------------------------------------------------------- feature matrix
-def feature_columns(batch: FeatureBatch) -> list[str]:
+@dataclass
+class PairMatrix:
+    """Compact pair features for real-data scale: keys + dense float64 matrix.
+
+    Same information as a FeatureBatch (PairKey per row, feature-schema column order, schema
+    ID) without one Python object per pair, so millions of pairs fit in Colab RAM.
+    Missing values are NaN.
+    """
+    keys: list
+    X: object  # numpy.ndarray, shape (len(keys), len(columns))
+    columns: list[str]
+    feature_schema_id: str
+
+    def __post_init__(self):
+        if getattr(self.X, "shape", None) != (len(self.keys), len(self.columns)):
+            raise ContractError("PairMatrix shape does not match keys/columns")
+
+    @classmethod
+    def from_batch(cls, batch: FeatureBatch, columns: list[str]) -> "PairMatrix":
+        keys, X = _matrix(batch, columns)
+        return cls(keys, X, list(columns), batch.feature_schema_id)
+
+    @classmethod
+    def concat(cls, parts: list["PairMatrix"], *, columns: list[str], feature_schema_id: str):
+        import numpy as np
+        for p in parts:
+            if p.columns != columns or p.feature_schema_id != feature_schema_id:
+                raise ContractError("Cannot concatenate PairMatrix parts with different schemas")
+        keys = [k for p in parts for k in p.keys]
+        X = (np.vstack([p.X for p in parts]) if parts
+             else np.empty((0, len(columns)), dtype=np.float64))
+        return cls(keys, X, list(columns), feature_schema_id)
+
+    def take(self, index) -> "PairMatrix":
+        return PairMatrix([self.keys[i] for i in index], self.X[index], self.columns,
+                          self.feature_schema_id)
+
+
+def _as_matrix(features, columns: list[str]):
+    """(keys, X) in `columns` order from a FeatureBatch or PairMatrix; rejects duplicate keys."""
+    if isinstance(features, PairMatrix):
+        if features.columns != list(columns):
+            raise ContractError("Feature columns do not match the trained model")
+        if len(set(features.keys)) != len(features.keys):
+            raise ContractError("Duplicate pair key in PairMatrix")
+        return features.keys, features.X
+    return _matrix(features, columns)
+
+
+def feature_columns(batch) -> list[str]:
+    if isinstance(batch, PairMatrix):
+        return list(batch.columns)
     if not batch.rows:
         raise ContractError("Cannot infer feature columns from an empty batch")
     columns = list(batch.rows[0].values)
@@ -146,15 +203,16 @@ def _build(kind: str, params: dict, seed: int):
                                                 random_state=seed, **params))
     if kind == "rf":
         return make_pipeline(SimpleImputer(strategy="median", add_indicator=True),
-                             RandomForestClassifier(class_weight="balanced", n_jobs=1,
-                                                    random_state=seed, **params))
+                             RandomForestClassifier(**{"class_weight": "balanced", "n_jobs": 1,
+                                                       "random_state": seed, **params}))
     if kind == "hgb":
         return HistGradientBoostingClassifier(class_weight="balanced", random_state=seed,
                                               early_stopping=False, **params)
     if kind == "lambdamart":
         from lightgbm import LGBMRanker
-        return LGBMRanker(objective="lambdarank", random_state=seed, n_jobs=1,
-                          deterministic=True, force_row_wise=True, verbose=-1, **params)
+        return LGBMRanker(**{"objective": "lambdarank", "random_state": seed, "n_jobs": 1,
+                             "deterministic": True, "force_row_wise": True, "verbose": -1,
+                             **params})
     raise ContractError(f"Unknown model kind {kind!r}; use one of {MODEL_KINDS}")
 
 
@@ -192,7 +250,7 @@ class ModelArtifact:
     selection: list[dict] = field(default_factory=list)
     provenance: dict = field(default_factory=dict)
     versions: dict = field(default_factory=dict)
-    feature_schema: dict | None = None  # TV2 FeatureSchema used at train time
+    feature_schema: dict | None = None  # FeatureSchema used at train time
     source_version: str | None = None   # git commit of the training code
     data_fingerprint: str = ""          # hash of train/valid matrices, targets, grid
     code_fingerprint: str = ""          # hash of the training code + library versions
@@ -242,18 +300,48 @@ def _data_fingerprint(train_keys, X_train, y_train, valid_keys, X_valid, valid_t
     for keys, X, y in ((train_keys, X_train, y_train),
                        (valid_keys, X_valid, [valid_targets.get(k) for k in valid_keys])):
         order = sorted(range(len(keys)), key=lambda i: keys[i])
-        h.update(json.dumps([[*keys[i], y[i]] for i in order]).encode())  # y may be None
+        # Streamed row by row: real runs have millions of pairs (no giant JSON string).
+        for i in order:
+            h.update(json.dumps([*keys[i], y[i]]).encode())  # y may be None
+        h.update(b"|")
         h.update(X[order].tobytes() if order else b"")
     h.update(json.dumps(sorted(map(list, valid_queries or ()))).encode())
     h.update(json.dumps(grid, sort_keys=True, default=str).encode())
     return h.hexdigest()
 
 
-def _check_schema(batch: FeatureBatch, schema: FeatureSchema, name: str):
+def _check_schema(batch, schema: FeatureSchema, name: str):
+    if isinstance(batch, PairMatrix):
+        _check_matrix_schema(batch, schema, name)
+        return
     report = validate_features(batch, schema)
     if not report.valid:
         codes = sorted({i.code for i in report.errors})
         raise ContractError(f"{name} features violate the feature schema: {codes}")
+
+
+def _check_matrix_schema(pm: PairMatrix, schema: FeatureSchema, name: str):
+    """Vectorized equivalent of validate_features for a PairMatrix."""
+    import numpy as np
+    if pm.feature_schema_id != schema.schema_id:
+        raise ContractError(f"{name} features violate the feature schema: ['feature_schema_mismatch']")
+    if pm.columns != [f.name for f in schema.features]:
+        raise ContractError(f"{name} features violate the feature schema: ['feature_columns_mismatch']")
+    errors = set()
+    for j, spec in enumerate(schema.features):
+        col = pm.X[:, j]
+        missing = np.isnan(col)
+        if missing.any() and not spec.nullable:
+            errors.add("null_not_allowed")
+        present = col[~missing]
+        if spec.minimum is not None and (present < spec.minimum).any():
+            errors.add("below_minimum")
+        if spec.maximum is not None and (present > spec.maximum).any():
+            errors.add("above_maximum")
+        if spec.dtype in ("int64", "bool") and (present != np.round(present)).any():
+            errors.add("dtype_mismatch")
+    if errors:
+        raise ContractError(f"{name} features violate the feature schema: {sorted(errors)}")
 
 
 def _versions() -> dict:
@@ -269,16 +357,16 @@ def _versions() -> dict:
 
 
 # ---------------------------------------------------------------------------- API
-def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
-              valid_features: FeatureBatch, valid_targets: dict[PairKey, int],
+def fit_model(train_features, train_targets: dict[PairKey, int],
+              valid_features, valid_targets: dict[PairKey, int],
               config: dict) -> ModelArtifact:
     """Fit one model family, choosing hyperparameters by MRR@5 on valid only.
 
-    config keys: kind (required), feature_schema (TV2 FeatureSchema; required for
+    config keys: kind (required), feature_schema (FeatureSchema; required for
     real data - fixes column order and is validated + stored in the artifact;
     omitted only for synthetic mock batches), seed=0, grid=DEFAULT_GRIDS[kind],
     neg_per_query=None, provenance={} (split_id, label_snapshot_id, ...),
-    evaluator=mrr_at_5 (inject TV5's evaluator: f(scores, valid_targets, queries=)->float),
+    evaluator=evaluator() (any f(scores, valid_targets, queries=) -> float),
     valid_queries=None (labeled valid query keys, incl. queries with 0 candidates).
     The refit-on-train+valid step is intentionally absent: the artifact is the
     exact model that was validated.
@@ -287,7 +375,7 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
     seed = int(config.get("seed", 0))
     grid = config.get("grid") or DEFAULT_GRIDS[kind]
     neg = config.get("neg_per_query")
-    evaluator: Callable = config.get("evaluator", mrr_at_5)
+    score_fn: Callable = config.get("evaluator") or evaluator()
     if train_features.feature_schema_id != valid_features.feature_schema_id:
         raise ContractError("Train/valid feature schema IDs differ")
     schema: FeatureSchema | None = config.get("feature_schema")
@@ -296,19 +384,19 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
             raise ContractError("Feature schema ID differs from the training batch")
         _check_schema(train_features, schema, "train")
         _check_schema(valid_features, schema, "valid")
-        columns = [spec.name for spec in schema.features]  # order fixed by TV2
+        columns = [spec.name for spec in schema.features]  # order fixed by the schema
     else:
         columns = feature_columns(train_features)
     source_version = _source_version()
     code_fp = _code_fingerprint()
 
-    keys, X = _matrix(train_features, columns)
+    keys, X = _as_matrix(train_features, columns)
     y = _targets_for(keys, train_targets)
     keep = _sample_negatives(keys, y, neg, seed)
     keys_s, X_s, y_s = [keys[i] for i in keep], X[keep], [y[i] for i in keep]
     if len(set(y_s)) < 2:
         raise ContractError("Training data needs both positive and negative pairs")
-    v_keys, X_v = _matrix(valid_features, columns)
+    v_keys, X_v = _as_matrix(valid_features, columns)
     data_fp = _data_fingerprint(keys_s, X_s, y_s, v_keys, X_v, valid_targets,
                                 config.get("valid_queries"), grid)
 
@@ -321,7 +409,7 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
                             feature_schema=schema.to_dict() if schema is not None else None,
                             source_version=source_version,
                             data_fingerprint=data_fp, code_fingerprint=code_fp)
-        score = evaluator(predict_scores(art, valid_features), valid_targets,
+        score = score_fn(predict_scores(art, valid_features), valid_targets,
                           queries=config.get("valid_queries"))
         selection.append(dict(params=params, valid_mrr_at_5=score))
         # Strict '>' keeps the earlier (simpler, listed first) config on ties.
@@ -331,21 +419,26 @@ def fit_model(train_features: FeatureBatch, train_targets: dict[PairKey, int],
     return best[1]
 
 
-def predict_scores(model_artifact: ModelArtifact, feature_batch: FeatureBatch) -> list[ScoreRecord]:
-    """Score every pair; output stays keyed by (arxiv_id, citation_key, ref_arxiv_id)."""
-    if feature_batch.feature_schema_id != model_artifact.feature_schema_id:
+def predict_score_array(model_artifact: ModelArtifact, features):
+    """(keys, float64 scores) for a FeatureBatch or PairMatrix; rejects non-finite scores."""
+    import numpy as np
+    if features.feature_schema_id != model_artifact.feature_schema_id:
         raise ContractError("Feature schema ID differs from the trained model")
-    if not feature_batch.rows:
-        return []
-    keys, X = _matrix(feature_batch, model_artifact.feature_columns)
-    raw = _raw_scores(model_artifact.estimator, model_artifact.kind, X)
-    out = []
-    for key, value in zip(keys, raw):
-        value = float(value)
-        if not math.isfinite(value):
-            raise ContractError(f"Non-finite score for {key}")
-        out.append(ScoreRecord(key[0], key[1], key[2], value))
-    return out
+    keys, X = _as_matrix(features, model_artifact.feature_columns)
+    if not keys:
+        return [], np.empty(0, dtype=np.float64)
+    raw = np.asarray(_raw_scores(model_artifact.estimator, model_artifact.kind, X),
+                     dtype=np.float64)
+    bad = ~np.isfinite(raw)
+    if bad.any():
+        raise ContractError(f"Non-finite score for {keys[int(np.argmax(bad))]}")
+    return keys, raw
+
+
+def predict_scores(model_artifact: ModelArtifact, feature_batch) -> list[ScoreRecord]:
+    """Score every pair; output stays keyed by (arxiv_id, citation_key, ref_arxiv_id)."""
+    keys, raw = predict_score_array(model_artifact, feature_batch)
+    return [ScoreRecord(k[0], k[1], k[2], float(v)) for k, v in zip(keys, raw)]
 
 
 def save_artifact(artifact: ModelArtifact, root: str | Path) -> Path:
@@ -394,3 +487,75 @@ def load_artifact(directory: str | Path) -> ModelArtifact:
     if meta["versions"].get("sklearn") != _versions()["sklearn"]:
         raise ContractError("scikit-learn version differs from the one used for training")
     return artifact
+
+
+# ------------------------------------------------------------------- freeze / test
+FROZEN_FILE = "frozen.json"
+TEST_ACCESS_LOG = "test_access.jsonl"
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def freeze(artifact_dir: str | Path, *, split_id: str, label_snapshot_id: str,
+           reason: str = "") -> dict:
+    """Lock the selected model before any test scoring.
+
+    Writes <artifact_dir>/frozen.json once: model_id, split/schema/label IDs,
+    code version, UTC time and the model.joblib hash. A second freeze of the
+    same directory is refused, so the lock time cannot be moved after the fact.
+    """
+    from datetime import datetime, timezone
+    from arxiv_pipeline.common.utils import atomic_json
+    directory = Path(artifact_dir)
+    artifact = load_artifact(directory)
+    target = directory / FROZEN_FILE
+    if target.exists():
+        raise ContractError(f"Model already frozen: {target}")
+    prov = artifact.provenance or {}
+    if prov.get("split_id") not in (None, split_id):
+        raise ContractError("Artifact was trained on a different split")
+    record = dict(model_id=artifact.model_id, kind=artifact.kind, params=artifact.params,
+                  split_id=split_id, label_snapshot_id=label_snapshot_id,
+                  feature_schema_id=artifact.feature_schema_id,
+                  source_version=artifact.source_version,
+                  model_sha256=_file_sha256(directory / "model.joblib"),
+                  selection=artifact.selection, reason=reason,
+                  frozen_at=datetime.now(timezone.utc).isoformat())
+    atomic_json(target, record)
+    return record
+
+
+def score_test(artifact_dir: str | Path, test_features, *, split_id: str):
+    """The only sanctioned way to score test pairs: requires a valid freeze.
+
+    Takes features only (never labels). Refuses when frozen.json is missing,
+    the model file changed after freezing, or the split/schema differ. Every
+    call is appended to test_access.jsonl so repeated test access is visible.
+    Returns (keys, scores) like predict_score_array.
+    """
+    from datetime import datetime, timezone
+    directory = Path(artifact_dir)
+    lock = directory / FROZEN_FILE
+    if not lock.is_file():
+        raise ContractError("Refusing to score test: model is not frozen (call freeze first)")
+    frozen = json.loads(lock.read_text(encoding="utf-8"))
+    if _file_sha256(directory / "model.joblib") != frozen["model_sha256"]:
+        raise ContractError("Refusing to score test: model.joblib changed after freezing")
+    if frozen["split_id"] != split_id:
+        raise ContractError("Refusing to score test: split_id differs from the frozen one")
+    artifact = load_artifact(directory)
+    if artifact.model_id != frozen["model_id"]:
+        raise ContractError("Refusing to score test: model_id differs from the frozen one")
+    keys, scores = predict_score_array(artifact, test_features)
+    entry = dict(model_id=artifact.model_id, split_id=split_id, pairs=len(keys),
+                 publications=len({k[0] for k in keys}),
+                 at=datetime.now(timezone.utc).isoformat())
+    with (directory / TEST_ACCESS_LOG).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    return keys, scores

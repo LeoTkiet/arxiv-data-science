@@ -1,4 +1,4 @@
-"""TV4 training driver: targets from labels, split-aware training, model comparison.
+"""Training helpers: targets from labels, split-aware training, model comparison.
 
 Run the synthetic smoke experiment (no real data, numbers are NOT results):
     python -m arxiv_pipeline.matching.train --mock --out artifacts/ms3_mock
@@ -28,14 +28,20 @@ def targets_from_labels(batch: FeatureBatch, labels: list[LabelRecord], *,
     matched -> 1 for the groundtruth pair, 0 for other candidates of that query;
     unmatched -> all 0; uncertain / unreviewed / unlabeled -> excluded.
     """
+    return targets_for_keys([row.key for row in batch.rows], labels, allow_sources=allow_sources)
+
+
+def targets_for_keys(keys, labels: list[LabelRecord], *,
+                     allow_sources=("manual", "heuristic")) -> dict[PairKey, int]:
+    """Same as targets_from_labels for a plain list of PairKeys (e.g. a PairMatrix)."""
     usable = {}
     for l in labels:
         if l.is_supervised and l.label_source in allow_sources:
             if l.key in usable:  # contract: one decision per query
                 raise ContractError(f"duplicate_label for query {l.key}")
             usable[l.key] = l
-    targets = {row.key: int(row.ref_arxiv_id == usable[row.key[:2]].groundtruth_arxiv_id)
-               for row in batch.rows if row.key[:2] in usable}
+    targets = {key: int(key[2] == usable[key[:2]].groundtruth_arxiv_id)
+               for key in keys if key[:2] in usable}
     # A matched query whose groundtruth pair is absent would silently become an
     # all-negative row (a fake "unmatched"); contract treats it as an error.
     present = {k[:2] for k, y in targets.items() if y == 1}
@@ -74,12 +80,11 @@ def train_and_compare(batch: FeatureBatch, labels: list[LabelRecord],
     """Fit each model family on train, tune on valid; never reads test.
 
     Returns (best_artifact, report). Model choice uses valid MRR@5 only; test is
-    scored later by TV5 after the config is frozen.
+    scored separately after the model is frozen.
     """
     sources = ("manual", "heuristic") if use_silver else ("manual",)
     train_t = targets_from_labels(partition_batch(batch, manifest, "train"), labels,
                                   allow_sources=sources)
-    # Validation keeps manual + auto pools exactly as split by TV5.
     valid_t = targets_from_labels(partition_batch(batch, manifest, "valid"), labels)
     train_b = partition_batch(batch, manifest, "train", only_keys=train_t)
     valid_b = partition_batch(batch, manifest, "valid", only_keys=valid_t)
@@ -193,7 +198,7 @@ def mock_dataset(seed=0, n_manual=25, n_auto=12, queries=(20, 30), refs=(15, 35)
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mock", action="store_true", required=True,
-                    help="Only synthetic mode exists until TV2/TV3/TV5 hand over real data")
+                    help="Synthetic smoke run; real data runs through matching.runner")
     ap.add_argument("--out", default="artifacts/ms3_mock")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--kinds", nargs="+", default=["logreg", "rf", "hgb", "lambdamart"],
