@@ -272,3 +272,20 @@ def test_query_slices_use_features_only():
     s = runner.query_slices(PairMatrix(keys, X, cols, schema.schema_id))
     assert s[("2301.00001", "a")] == ["no_title_signal", "no_author_signal"]
     assert s[("2301.00001", "b")] == ["no_author_signal"]
+
+
+def test_ablation_variants_on_train_folds(setup):
+    config, bundles, labels, manifest = setup
+    run = _prepared(config)
+    runner.stage_train(run)
+    receipt = runner.stage_ablation(run, folds=2, eval_queries=50)
+    rows = json.loads(run.path("analysis", "ablation.json").read_text())
+    ran = {(r["fold"], r["model"]) for r in rows}
+    assert all((f, v) in ran or {"fold": f, "variant": v} in
+               [{k: x[k] for k in ("fold", "variant")} for x in receipt["skipped"]]
+               for f in (0, 1) for v in runner.ABLATIONS)  # every variant ran or is reported as skipped
+    assert {r["model"] for r in rows} >= set(runner.ABLATIONS) - {"manual_only"}
+    assert receipt["kind"] == runner.stage_train(run)["selected_kind"]  # same family as the selected model
+    train_pubs = {r.arxiv_id for r in manifest.rows if r.partition == "train"}
+    assert all(r["queries"] <= sum(l.arxiv_id in train_pubs for l in labels) for r in rows)
+    assert not run.path("frozen.json").exists()  # analysis never freezes or scores test

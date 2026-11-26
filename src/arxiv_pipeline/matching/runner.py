@@ -505,34 +505,18 @@ def _fold_of(pubs, folds, seed):
     return {p: i % folds for i, p in enumerate(order)}
 
 
-def stage_cv(run: Run, *, folds: int = 3, eval_queries: int = 10000) -> dict:
-    """Compare models with the baseline on held-out train publications, by hard-case slice.
+def _cv_folds(run: Run, labels, *, folds: int, eval_queries: int):
+    """Grouped K-fold over train publications (test never touched).
 
-    Valid is saturated, so this grouped K-fold over train publications tests
-    whether learning helps where the title heuristic has nothing to use. Each
-    model uses the configuration selected on valid (no extra tuning); test is
-    never touched. Per fold, held-out queries are all manual ones plus a seeded
-    sample of `eval_queries` heuristic ones. Reported per slice and label source:
-    MRR@5 over labeled queries (official) and over matched queries only.
+    Yields (fold, fit, fit_targets, held_out, held_out_targets, held_out_queries).
+    Held-out queries: all manual ones plus a seeded sample of `eval_queries`
+    heuristic ones, so large folds stay cheap to score.
     """
-    if (receipt := run.done("cv")):
-        return receipt
-    from arxiv_pipeline.matching.baseline import score_pair_heuristics
-    from arxiv_pipeline.matching.features import get_feature_schema
-    from arxiv_pipeline.matching.model import evaluator, fit_model, predict_scores
-    from arxiv_pipeline.matching.contracts import ScoreRecord
     config = run.config
-    schema = get_feature_schema()
-    score_fn = evaluator()
-    _, labels = load_inputs(run)
     source = {l.key: l.label_source for l in labels if l.is_supervised}
-    selection = [r for r in _read_json(run.path("metrics", "model_selection.json")) if r["model_id"]]
     train, train_t = _training_data(run, labels)
     fold = _fold_of({k[0] for k in train.keys}, folds, config.seed)
-    slices = query_slices(train)
-    rows = []
     for f in range(folds):
-        fit_idx = [i for i, k in enumerate(train.keys) if fold[k[0]] != f]
         held = [i for i, k in enumerate(train.keys) if fold[k[0]] == f]
         held_q = sorted({train.keys[i][:2] for i in held})
         manual_q = [q for q in held_q if source.get(q) == "manual"]
@@ -540,9 +524,58 @@ def stage_cv(run: Run, *, folds: int = 3, eval_queries: int = 10000) -> dict:
         rng = random.Random(config.seed + f)
         chosen = set(manual_q) | set(auto_q if len(auto_q) <= eval_queries else rng.sample(auto_q, eval_queries))
         ev = train.take([i for i in held if train.keys[i][:2] in chosen])
-        ev_t = {k: train_t[k] for k in ev.keys}
-        fit = train.take(fit_idx)
-        fit_t = {k: train_t[k] for k in fit.keys}
+        fit = train.take([i for i, k in enumerate(train.keys) if fold[k[0]] != f])
+        yield (f, fit, {k: train_t[k] for k in fit.keys}, ev, {k: train_t[k] for k in ev.keys}, chosen)
+
+
+def _score_rows(fold, named, ev_t, chosen, slices, source, score_fn):
+    """MRR@5 (official, and on matched queries only) per label source x slice."""
+    rows = []
+    for name, scores in named:
+        by_q: dict = {}
+        for s in scores:
+            by_q.setdefault((s.arxiv_id, s.citation_key), []).append(s)
+        for group in ("all", "manual", "heuristic"):
+            for sl in ("all", *CV_SLICES):
+                qs = {q for q in chosen if (group == "all" or (source.get(q) == "manual") == (group == "manual"))
+                      and (sl == "all" or sl in slices[q])}
+                if not qs:
+                    continue
+                matched = {k[:2] for k, y in ev_t.items() if y == 1 and k[:2] in qs}
+                sub = [s for q in qs for s in by_q.get(q, [])]
+                t_all = {k: y for k, y in ev_t.items() if k[:2] in qs}
+                t_m = {k: y for k, y in ev_t.items() if k[:2] in matched}
+                rows.append(dict(fold=fold, model=name, labels=group, slice=sl, queries=len(qs),
+                                 matched=len(matched), mrr_at_5=score_fn(sub, t_all),
+                                 mrr_matched_only=(score_fn([s for s in sub if (s.arxiv_id, s.citation_key)
+                                                             in matched], t_m) if matched else None)))
+    return rows
+
+
+def stage_cv(run: Run, *, folds: int = 3, eval_queries: int = 10000) -> dict:
+    """Compare models with the baseline on held-out train publications, by hard-case slice.
+
+    Valid is saturated, so this grouped K-fold over train publications tests
+    whether learning helps where the title heuristic has nothing to use. Each
+    model uses the configuration selected on valid (no extra tuning); test is
+    never touched. Reported per slice and label source: MRR@5 over labeled
+    queries (official) and over matched queries only.
+    """
+    if (receipt := run.done("cv")):
+        return receipt
+    from arxiv_pipeline.matching.baseline import score_pair_heuristics
+    from arxiv_pipeline.matching.contracts import ScoreRecord
+    from arxiv_pipeline.matching.features import get_feature_schema
+    from arxiv_pipeline.matching.model import evaluator, fit_model, predict_scores
+    config = run.config
+    schema = get_feature_schema()
+    score_fn = evaluator()
+    _, labels = load_inputs(run)
+    source = {l.key: l.label_source for l in labels if l.is_supervised}
+    selection = [r for r in _read_json(run.path("metrics", "model_selection.json")) if r["model_id"]]
+    slices = query_slices(_training_data(run, labels)[0])
+    rows = []
+    for f, fit, fit_t, ev, ev_t, chosen in _cv_folds(run, labels, folds=folds, eval_queries=eval_queries):
         named = [("baseline", [ScoreRecord(k[0], k[1], k[2], score_pair_heuristics(dict(zip(ev.columns, v))))
                                for k, v in zip(ev.keys, ev.X.tolist())])]
         for r in selection:
@@ -551,29 +584,68 @@ def stage_cv(run: Run, *, folds: int = 3, eval_queries: int = 10000) -> dict:
                                                        neg_per_query=config.neg_per_query,
                                                        feature_schema=schema, evaluator=score_fn))
             named.append((r["kind"], predict_scores(art, ev)))
-        del fit, fit_t
-        for name, scores in named:
-            by_q: dict = {}
-            for s in scores:
-                by_q.setdefault((s.arxiv_id, s.citation_key), []).append(s)
-            for group in ("all", "manual", "heuristic"):
-                for sl in ("all", *CV_SLICES):
-                    qs = {q for q in chosen if (group == "all" or (source.get(q) == "manual") == (group == "manual"))
-                          and (sl == "all" or sl in slices[q])}
-                    matched = {k[:2] for k, y in ev_t.items() if y == 1 and k[:2] in qs}
-                    if not qs:
-                        continue
-                    sub = [s for q in qs for s in by_q.get(q, [])]
-                    t_all = {k: y for k, y in ev_t.items() if k[:2] in qs}
-                    t_m = {k: y for k, y in ev_t.items() if k[:2] in matched}
-                    rows.append(dict(fold=f, model=name, labels=group, slice=sl, queries=len(qs),
-                                     matched=len(matched), mrr_at_5=score_fn(sub, t_all),
-                                     mrr_matched_only=(score_fn([s for s in sub if (s.arxiv_id, s.citation_key)
-                                                                 in matched], t_m) if matched else None)))
+        rows += _score_rows(f, named, ev_t, chosen, slices, source, score_fn)
         atomic_json(run.path("analysis", "cv_hard_cases.json"), rows)
-    summary = _cv_summary(rows)
-    run.path("analysis", "cv_hard_cases.md").write_text(summary, encoding="utf-8")
+    run.path("analysis", "cv_hard_cases.md").write_text(_cv_summary(rows), encoding="utf-8")
     return run.finish("cv", folds=folds, eval_queries=eval_queries, rows=len(rows))
+
+
+ABLATIONS = ("full", "no_title", "title_only", "no_author", "no_temporal", "no_identifier", "manual_only")
+
+
+def stage_ablation(run: Run, *, folds: int = 3, eval_queries: int = 10000) -> dict:
+    """Ablation of the frozen model's family on the same grouped train folds.
+
+    One change per variant: drop a feature group (no_title, no_author,
+    no_temporal, no_identifier), keep only title features (title_only), or fit
+    only on manual labels (manual_only). Same kind and parameters as the
+    selected model, evaluated like stage_cv; test is never touched. Analysis
+    only: it does not change the selected/frozen model.
+    """
+    if (receipt := run.done("ablation")):
+        return receipt
+    from arxiv_pipeline.matching.analysis import FEATURE_GROUPS, _subset
+    from arxiv_pipeline.matching.features import get_feature_schema
+    from arxiv_pipeline.matching.model import evaluator, fit_model, predict_scores
+    config = run.config
+    schema = get_feature_schema()
+    score_fn = evaluator()
+    _, labels = load_inputs(run)
+    source = {l.key: l.label_source for l in labels if l.is_supervised}
+    selected = run.done("train")
+    best = next(r for r in _read_json(run.path("metrics", "model_selection.json"))
+                if r["model_id"] == selected["selected"])
+    slices = query_slices(_training_data(run, labels)[0])
+    columns = [f.name for f in schema.features]
+    keep = {"full": columns, "title_only": FEATURE_GROUPS["title"],
+            **{f"no_{g}": [c for c in columns if c not in FEATURE_GROUPS[g]]
+               for g in ("title", "author", "temporal", "identifier")},
+            "manual_only": columns}
+    rows, skipped = [], []
+    for f, fit, fit_t, ev, ev_t, chosen in _cv_folds(run, labels, folds=folds, eval_queries=eval_queries):
+        named = []
+        for variant in ABLATIONS:
+            tr, sub = _subset(fit, keep[variant], schema)
+            va, _ = _subset(ev, keep[variant], schema)
+            tr_t = fit_t
+            if variant == "manual_only":
+                idx = [i for i, k in enumerate(tr.keys) if source.get(k[:2]) == "manual"]
+                tr = tr.take(idx)
+                tr_t = {k: fit_t[k] for k in tr.keys}
+            log.info("ablation fold %d/%d: %s (%d pairs)", f + 1, folds, variant, len(tr.keys))
+            if len(set(tr_t.values())) < 2:
+                # e.g. manual_only on a fold whose training part has no matched manual query
+                skipped.append(dict(fold=f, variant=variant, reason="training part lacks positives or negatives"))
+                continue
+            art = fit_model(tr, tr_t, va, ev_t, dict(kind=best["kind"], seed=config.seed, grid=[best["params"]],
+                                                     neg_per_query=config.neg_per_query,
+                                                     feature_schema=sub, evaluator=score_fn))
+            named.append((variant, predict_scores(art, va)))
+        rows += _score_rows(f, named, ev_t, chosen, slices, source, score_fn)
+        atomic_json(run.path("analysis", "ablation.json"), rows)
+    run.path("analysis", "ablation.md").write_text(_cv_summary(rows), encoding="utf-8")
+    return run.finish("ablation", folds=folds, eval_queries=eval_queries, kind=best["kind"],
+                      params=best["params"], variants=list(ABLATIONS), skipped=skipped)
 
 
 def _cv_summary(rows) -> str:
@@ -647,13 +719,13 @@ def write_run_manifest(run: Run) -> Path:
     manifest = dict(schema_version="3.0", task="MS3-matching-models", run_id=run.run_id, created_at=_now(),
                     source_version=_source_version(), python=platform.python_version(),
                     versions=_versions(), config=_jsonable(asdict(run.config)),
-                    stages={s: run.done(s) for s in ("inputs", "features", "train", "analysis", "cv", "freeze")},
+                    stages={s: run.done(s) for s in ("inputs", "features", "train", "analysis", "cv", "ablation", "freeze")},
                     test_labels_read=False)
     atomic_json(run.path("run_manifest.json"), manifest)
     return run.path("run_manifest.json")
 
 
-def run_all(config: RunConfig, *, freeze: bool = False, cv: bool = False) -> Run:
+def run_all(config: RunConfig, *, freeze: bool = False, cv: bool = False, ablation: bool = False) -> Run:
     run = Run(config)
     stage_inputs(run)
     stage_features(run)
@@ -661,6 +733,8 @@ def run_all(config: RunConfig, *, freeze: bool = False, cv: bool = False) -> Run
     stage_analysis(run)
     if cv:
         stage_cv(run)
+    if ablation:
+        stage_ablation(run)
     if freeze:
         stage_freeze_and_score(run)
     write_run_manifest(run)
@@ -679,6 +753,8 @@ def main(argv=None) -> int:
     ap.add_argument("--neg-per-query", type=int, default=0)
     ap.add_argument("--cv", action="store_true",
                     help="compare models vs baseline by hard-case slice with grouped CV on train")
+    ap.add_argument("--ablation", action="store_true",
+                    help="ablation of the selected model (feature groups, manual-only labels) on train folds")
     ap.add_argument("--freeze", action="store_true",
                     help="freeze the selected model and score test (only after reviewing selection and analysis)")
     args = ap.parse_args(argv)
@@ -686,7 +762,7 @@ def main(argv=None) -> int:
                        output_root=args.output, run_id=args.run_id or new_run_id(),
                        kinds=tuple(k.strip() for k in args.kinds.split(",") if k.strip()),
                        seed=args.seed, neg_per_query=args.neg_per_query or None)
-    run = run_all(config, freeze=args.freeze, cv=args.cv)
+    run = run_all(config, freeze=args.freeze, cv=args.cv, ablation=args.ablation)
     print("RUN_ID:", run.run_id)
     print(run.path("metrics", "model_selection.md").read_text(encoding="utf-8"))
     print("Kết quả:", run.root)
