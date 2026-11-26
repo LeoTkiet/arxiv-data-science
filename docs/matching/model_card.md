@@ -1,7 +1,5 @@
 # Model card — Reference Matching (MS3)
 
-> Số liệu test để trống cho tới khi khóa mô hình và chấm test. Không điền số từ dữ liệu giả lập.
-
 ## 1. Mô hình
 
 | Mục | Giá trị |
@@ -13,7 +11,7 @@
 | Nhãn train | Manual + heuristic đã `accepted`; bỏ `uncertain`/`pending` |
 | Mất cân bằng lớp | `class_weight="balanced"`; không negative sampling (train trên toàn bộ ma trận) |
 | Chọn mô hình | MRR@5 trên valid bằng evaluator chính thức (`metrics.score_mrr_at_5`); hoà điểm giữ cấu hình đứng trước (đơn giản hơn) |
-| Mô hình cuối | Logistic Regression, `C=0.01` (`logreg-53571b7d07e5`), khóa lúc 2026-11-26 15:31 UTC |
+| Mô hình cuối | Logistic Regression, `C=0.01` (`logreg-53571b7d07e5`) |
 | MRR@5 valid / test | 0,2214 (bằng trần 91/411) / — (chấm từ `scores/test`) |
 
 ## 2. Chống rò rỉ
