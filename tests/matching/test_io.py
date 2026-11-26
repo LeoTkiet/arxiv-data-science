@@ -1,6 +1,7 @@
 """Snapshot boundary tests: readiness is evidence, never just file existence."""
 import hashlib
 import json
+import zipfile
 
 import pytest
 
@@ -65,6 +66,47 @@ def _checkpoint(root, stage, paper, artifacts, status='success', schema='2.0'):
 def test_loader_requires_an_implemented_boundary(tmp_path):
     from arxiv_pipeline.matching import io
     assert callable(getattr(io, 'load_publication', None)), 'T1-02 loader is missing'
+
+
+@pytest.mark.parametrize('prefix', ['', 'MS2_RESULTS/'])
+def test_loader_reads_nested_ms2_zip_without_extraction(tmp_path, prefix):
+    from arxiv_pipeline.matching.io import load_with_provenance
+    ctx = ready_snapshot(tmp_path)
+    ms2 = ctx['ms2_root']
+    archive_path = tmp_path / 'MS2_RESULTS.zip'
+    with zipfile.ZipFile(archive_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in ms2.rglob('*.json'):
+            archive.write(path, prefix + path.relative_to(ms2).as_posix())
+    direct = load_with_provenance('2310.12345', {**ctx, 'ms2_root': archive_path},
+                                  include_export_tables=True)
+    folder = tmp_path / 'archives'
+    folder.mkdir()
+    archive_path.rename(folder / archive_path.name)
+    from_folder = load_with_provenance('2310.12345', {**ctx, 'ms2_root': folder})
+    assert direct.bundle.readiness == from_folder.bundle.readiness == 'ready'
+    assert direct.bundle.to_dict() == from_folder.bundle.to_dict()
+    assert direct.source_tables is not None
+    assert 'ms2/tables/2310.12345/bibtex.json' in direct.provenance['files']
+
+
+def test_prepare_pool_reads_member_folder_containing_ms2_zip(tmp_path):
+    from arxiv_pipeline.matching.silver_pool import prepare_pool
+    ctx = ready_snapshot(tmp_path)
+    ms2 = ctx['ms2_root']
+    folder = tmp_path / 'tv1'
+    folder.mkdir()
+    with zipfile.ZipFile(folder / 'MS2_RESULTS.zip', 'w') as archive:
+        for path in ms2.rglob('*.json'):
+            archive.write(path, 'output/' + path.relative_to(ms2).as_posix())
+    selection = tmp_path / 'selection.json'
+    atomic_json(selection, {'task': 'T3-05', 'selected': {'tv1': ['2310.12345']}})
+    roots = tmp_path / 'roots.json'
+    atomic_json(roots, {'tv1': {'ms1_root': str(ctx['ms1_root']),
+                                'ms2_root': str(folder), 'fixture_mode': True}})
+    output = tmp_path / 'prepared'
+    result = prepare_pool(selection, roots, output)
+    assert result['ready'] == 1 and result['not_ready'] == 0
+    assert (output / 'bundles/tv1/2310.12345.json').is_file()
 
 
 def test_full_pipeline_inputs_include_five_tables_and_frozen_provenance(tmp_path):

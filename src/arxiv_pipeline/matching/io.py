@@ -6,7 +6,9 @@ inventory is also the input dependency for the matching resume mechanism.
 from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import stat
+import zipfile
 
 from arxiv_pipeline.common.utils import paper_key
 from arxiv_pipeline.matching.contracts import (
@@ -31,9 +33,77 @@ class _NotReady(ValueError):
     pass
 
 
+class ZipSnapshot:
+    """Read an MS2 snapshot from one ZIP without extracting its artifacts."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.archive = zipfile.ZipFile(path)
+        names = self.archive.namelist()
+        if len(names) != len(set(names)):
+            self.archive.close()
+            raise ValueError(f'Duplicate ZIP members in {path}')
+        prefixes = {name.split('state/parsing/', 1)[0] for name in names
+                    if 'state/parsing/' in name and name.endswith('.json')}
+        if len(prefixes) != 1:
+            self.archive.close()
+            raise ValueError(f'Expected one MS2 snapshot root in {path}, found {len(prefixes)}')
+        self.prefix = prefixes.pop()
+        if (self.prefix and (self.prefix.startswith('/') or '\\' in self.prefix
+                or any(part in ('', '.', '..') for part in self.prefix.rstrip('/').split('/')))):
+            self.archive.close()
+            raise ValueError(f'Unsafe ZIP snapshot prefix in {path}')
+
+    def _member(self, relative: str) -> str:
+        if (not isinstance(relative, str) or not relative or '\\' in relative
+                or relative.startswith('/') or any(p in ('', '.', '..') for p in relative.split('/'))):
+            raise ValueError(f'Unsafe ZIP artifact path: {relative}')
+        return self.prefix + str(PurePosixPath(relative))
+
+    def validate(self, relative: str) -> None:
+        name = self._member(relative)
+        info = self.archive.NameToInfo.get(name)
+        if info is not None and stat.S_ISLNK(info.external_attr >> 16):
+            raise ValueError(f'Symlink ZIP artifact: {name}')
+
+    def read_bytes(self, relative: str) -> bytes:
+        self.validate(relative)
+        name = self._member(relative)
+        try:
+            return self.archive.read(name)
+        except KeyError as exc:
+            raise FileNotFoundError(f'{self.path}!/{name}') from exc
+
+    def close(self) -> None:
+        self.archive.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+
+def ms2_snapshot_path(root: Path) -> Path:
+    """Accept an extracted root, a ZIP path, or a folder containing one MS2 ZIP."""
+    root = Path(root).resolve()
+    if root.is_dir() and not (root / 'state').is_dir():
+        archives = list(root.glob('*.zip'))
+        if len(archives) != 1:
+            raise ValueError(f'Expected one MS2 ZIP in {root}, found {len(archives)}')
+        return archives[0]
+    return root
+
+
 def load_with_provenance(arxiv_id, context, *, include_export_tables=False) -> LoadedPublication:
     paper = canonical_id(arxiv_id)
     roots = {name: Path(context[f'{name}_root']).resolve() for name in ('ms1', 'ms2')}
+    roots['ms2'] = ms2_snapshot_path(roots['ms2'])
+    archive = context.get('_ms2_archive')
+    owned_archive = False
+    if roots['ms2'].suffix.lower() == '.zip' and archive is None:
+        archive = ZipSnapshot(roots['ms2'])
+        owned_archive = True
     files = {}
     contents = {}
     snapshot = None
@@ -42,7 +112,8 @@ def load_with_provenance(arxiv_id, context, *, include_export_tables=False) -> L
     def read_bytes(source, relative):
         key = f'{source}/{relative}'
         if key not in contents:
-            raw = safe_path(roots[source], relative).read_bytes()
+            raw = (archive.read_bytes(relative) if source == 'ms2' and archive is not None
+                   else safe_path(roots[source], relative).read_bytes())
             files[key] = hashlib.sha256(raw).hexdigest()
             contents[key] = raw
         return contents[key]
@@ -65,7 +136,10 @@ def load_with_provenance(arxiv_id, context, *, include_export_tables=False) -> L
             raise ContractError(f'Missing artifact declarations in {stage}')
         # Validate paths even when an artifact is not needed for the basic join.
         for relative_artifact in artifacts.values():
-            safe_path(roots[source], relative_artifact)
+            if source == 'ms2' and archive is not None:
+                archive.validate(relative_artifact)
+            else:
+                safe_path(roots[source], relative_artifact)
         if source == 'ms2':
             deps = read(source, relative.replace('.json', '.dependencies.json'))
             inventory = deps.get('artifacts') if isinstance(deps, dict) else None
@@ -164,9 +238,11 @@ def load_with_provenance(arxiv_id, context, *, include_export_tables=False) -> L
     except (FileNotFoundError, _NotReady) as exc:
         bundle = PublicationBundle(paper, [], [], 'not_ready', [Issue(paper, 'match_input',
             'upstream_not_ready', 'error', str(exc))])
-    except (OSError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, zipfile.BadZipFile) as exc:
         bundle = PublicationBundle(paper, [], [], 'invalid', [Issue(paper, 'match_input',
             'invalid_snapshot', 'error', str(exc))])
+    if owned_archive:
+        archive.close()
     provenance = dict(files=files, input_fingerprint=digest(files), input_snapshot_id=snapshot,
                       synthetic=bool(context.get('fixture_mode', False)))
     return LoadedPublication(bundle, provenance, source_tables)

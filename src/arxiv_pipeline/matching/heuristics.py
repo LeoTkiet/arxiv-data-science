@@ -21,6 +21,11 @@ from arxiv_pipeline.matching.contracts import (
     ReferenceInput,
     canonical_id,
 )
+from arxiv_pipeline.matching.cleaning import (
+    extract_arxiv_id as cleaning_extract_arxiv_id,
+    parse_authors as cleaning_parse_authors,
+)
+from arxiv_pipeline.matching.features import _char_3grams, _cosine_counter
 
 # arXiv ID patterns: modern YYMM.NNNNN[vN] and legacy archive/YYMMNNN[vN]
 _NEW_ARXIV_ID_RE = re.compile(r"(?<![0-9])(\d{4}\.\d{4,5}(?:v\d+)?)(?![0-9])", re.I)
@@ -29,6 +34,7 @@ _OLD_ARXIV_ID_RE = re.compile(
     re.I,
 )
 _YEAR_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
+_AUTHOR_NOISE = {"others", "et", "al", "collaboration", "collaborators", "group", "consortium"}
 _LATEX_WRAPPER_RE = re.compile(r"\\[a-zA-Z]+\s*\{([^{}]*)\}")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 
@@ -37,13 +43,20 @@ _NON_ALNUM_RE = re.compile(r"[^a-z0-9\s]+")
 class HeuristicPolicy:
     """Configurable thresholds and policy for high-precision heuristic labeling."""
 
-    heuristic_version: str = "v1.0.0"
+    heuristic_version: str = "v1.4.0"
     exact_title_threshold: float = 0.96
-    high_title_threshold: float = 0.88
+    high_title_threshold: float = 0.84
     no_match_title_threshold: float = 0.25
+    arxiv_id_title_conflict_threshold: float = 0.25
     min_title_chars_for_exact: int = 8
     min_margin_over_second: float = 0.10
     max_year_diff: int = 3
+    title_similarity_method: str = "hybrid_sequence_jaccard"
+    decision_mode: str = "conservative"
+    match_score_threshold: float = 0.72
+    title_score_weight: float = 0.70
+    author_score_weight: float = 0.25
+    year_score_weight: float = 0.05
     accept_clear_decisions: bool = False
 
 
@@ -58,6 +71,10 @@ def normalize_title(title: str | None) -> str:
     if not title:
         return ""
     cleaned = title
+    # Compact only explicit TeX subscripts, preserving their values. This makes
+    # G_0W_0 and G0W0 comparable without removing other mathematical operators.
+    cleaned = re.sub(r"(?<=[A-Za-z0-9])_\s*\{([A-Za-z0-9]+)\}", r"\1", cleaned)
+    cleaned = re.sub(r"(?<=[A-Za-z0-9])_([A-Za-z0-9])", r"\1", cleaned)
     for _ in range(3):
         updated = _LATEX_WRAPPER_RE.sub(r" \1 ", cleaned)
         if updated == cleaned:
@@ -75,6 +92,10 @@ def extract_arxiv_ids(text: str | None) -> list[str]:
         return []
     found: list[str] = []
     seen: set[str] = set()
+    cleaned_id = cleaning_extract_arxiv_id(text)
+    if cleaned_id:
+        seen.add(cleaned_id)
+        found.append(cleaned_id)
     for pattern in (_NEW_ARXIV_ID_RE, _OLD_ARXIV_ID_RE):
         for match in pattern.finditer(text):
             try:
@@ -92,20 +113,35 @@ def extract_author_last_names(authors: Iterable[str] | None) -> set[str]:
     if not authors:
         return set()
     surnames: set[str] = set()
+    try:
+        for parsed in cleaning_parse_authors(list(authors)):
+            last = _strip_accents(parsed.get("last_name", "")).casefold().strip()
+            if last and last not in _AUTHOR_NOISE:
+                surnames.add(last)
+    except (TypeError, ValueError):
+        pass
     for raw in authors:
         if not raw or not isinstance(raw, str):
             continue
         author = _strip_accents(raw).replace("{", "").replace("}", "").strip().lower()
         if not author:
             continue
+        tokens_all = _NON_ALNUM_RE.sub(" ", author).split()
+        if not tokens_all or any(token in {"collaboration", "collaborators", "group", "consortium"} for token in tokens_all):
+            continue
+        # "Xin Suo et al." names the first author; keep Suo rather than
+        # discarding the whole field or treating "al" as a surname.
+        if len(tokens_all) >= 3 and tokens_all[-2:] == ["et", "al"]:
+            tokens_all = tokens_all[:-2]
+            author = " ".join(tokens_all)
         if "," in author:
             surname_part = author.split(",", 1)[0].strip()
             tokens = _NON_ALNUM_RE.sub(" ", surname_part).split()
-            if tokens:
+            if tokens and tokens[-1] not in _AUTHOR_NOISE:
                 surnames.add(tokens[-1])
         else:
             tokens = _NON_ALNUM_RE.sub(" ", author).split()
-            if tokens:
+            if tokens and tokens[-1] not in _AUTHOR_NOISE:
                 surnames.add(tokens[-1])
     return surnames
 
@@ -118,12 +154,18 @@ def extract_submission_year(submission_date: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def title_similarity(norm_a: str, norm_b: str) -> float:
+def title_similarity(
+    norm_a: str, norm_b: str, method: str = "hybrid_sequence_jaccard"
+) -> float:
     """Compute a conservative similarity score in [0.0, 1.0] for two normalized titles."""
     if not norm_a or not norm_b:
         return 0.0
     if norm_a == norm_b:
         return 1.0
+    if method == "char_3gram_cosine":
+        return _cosine_counter(_char_3grams(norm_a), _char_3grams(norm_b))
+    if method != "hybrid_sequence_jaccard":
+        raise ValueError(f"Unsupported title similarity method: {method}")
     tokens_a = set(norm_a.split())
     tokens_b = set(norm_b.split())
     if not tokens_a or not tokens_b:
@@ -134,7 +176,7 @@ def title_similarity(norm_a: str, norm_b: str) -> float:
 
 
 def _has_year_conflict(bib_year: int | None, ref_date: str | None, max_diff: int) -> bool:
-    if bib_year is None:
+    if bib_year is None or not 1900 <= bib_year <= 2100:
         return False
     ref_year = extract_submission_year(ref_date)
     if ref_year is None:
@@ -187,17 +229,28 @@ def _label_single_query(
     bib_title_norm = normalize_title(bib.title)
     bib_surnames = extract_author_last_names(bib.authors)
 
-    # Rule 1: Explicit arXiv ID in doi / url / journal
+    # Rule 1: Explicit arXiv ID in doi / url / journal / citation key
     explicit_ids: set[str] = set()
-    for field in (bib.doi, bib.url, bib.journal):
+    for field in (bib.doi, bib.url, bib.journal, bib.citation_key):
         explicit_ids.update(extract_arxiv_ids(field))
 
     ref_by_id = {canonical_id(r.ref_arxiv_id): r for r in references}
     id_matches = [ref_by_id[cid] for cid in explicit_ids if cid in ref_by_id]
     if len(id_matches) == 1:
         matched_ref = id_matches[0]
+        if policy.decision_mode == "binary_calibrated":
+            return _make_record(
+                bib,
+                groundtruth_arxiv_id=canonical_id(matched_ref.ref_arxiv_id),
+                decision="matched",
+                confidence=0.99,
+                policy=policy,
+                notes="rule=calibrated_explicit_arxiv_id",
+            )
         ref_title_norm = normalize_title(matched_ref.ref_title)
-        if bib_title_norm and ref_title_norm and title_similarity(bib_title_norm, ref_title_norm) < policy.no_match_title_threshold:
+        if (bib_title_norm and ref_title_norm and title_similarity(
+                bib_title_norm, ref_title_norm, policy.title_similarity_method
+        ) < policy.arxiv_id_title_conflict_threshold):
             return _make_record(
                 bib,
                 groundtruth_arxiv_id=None,
@@ -234,13 +287,74 @@ def _label_single_query(
         ref_title_norm = normalize_title(ref.ref_title)
         if not ref_title_norm:
             any_missing_title = True
-        sim = title_similarity(bib_title_norm, ref_title_norm)
+        sim = title_similarity(
+            bib_title_norm, ref_title_norm, policy.title_similarity_method
+        )
         ref_surnames = extract_author_last_names(ref.ref_authors)
         overlap = len(bib_surnames & ref_surnames) if (bib_surnames and ref_surnames) else 0
         year_conflict = _has_year_conflict(bib.year, ref.ref_submission_date, policy.max_year_diff)
         max_raw_sim = max(max_raw_sim, sim)
         max_author_overlap = max(max_author_overlap, overlap)
         scored.append((sim, overlap, year_conflict, ref, ref_title_norm))
+
+    if policy.decision_mode == "binary_calibrated":
+        if policy.title_similarity_method not in {"hybrid_sequence_jaccard", "char_3gram_cosine"}:
+            raise ContractError("Unsupported title similarity method for binary policy")
+        weights = (
+            policy.title_score_weight,
+            policy.author_score_weight,
+            policy.year_score_weight,
+        )
+        if any(weight < 0 for weight in weights) or not abs(sum(weights) - 1.0) < 1e-9:
+            raise ContractError("Binary policy weights must be non-negative and sum to 1")
+        if not 0.0 <= policy.match_score_threshold <= 1.0:
+            raise ContractError("match_score_threshold must be in [0, 1]")
+
+        def calibrated_score(item):
+            sim, overlap, _, ref, ref_title_norm = item
+            ref_surnames = extract_author_last_names(ref.ref_authors)
+            author_jaccard = (
+                len(bib_surnames & ref_surnames) / len(bib_surnames | ref_surnames)
+                if bib_surnames and ref_surnames else 0.0
+            )
+            ref_year = extract_submission_year(ref.ref_submission_date)
+            if bib.year is not None and ref_year is not None:
+                year_score = max(0.0, 1.0 - abs(int(bib.year) - ref_year) / 6.0)
+            else:
+                year_score = 0.5
+            score = (
+                policy.title_score_weight * sim
+                + policy.author_score_weight * author_jaccard
+                + policy.year_score_weight * year_score
+            )
+            return score, overlap, ref
+
+        ranked = sorted(
+            (calibrated_score(item) for item in scored),
+            key=lambda item: (item[0], item[1]),
+            reverse=True,
+        )
+        best_score, _, best_ref = ranked[0]
+        if best_score >= policy.match_score_threshold:
+            return _make_record(
+                bib,
+                groundtruth_arxiv_id=canonical_id(best_ref.ref_arxiv_id),
+                decision="matched",
+                confidence=best_score,
+                policy=policy,
+                notes="rule=calibrated_multisignal_match",
+            )
+        return _make_record(
+            bib,
+            groundtruth_arxiv_id=None,
+            decision="unmatched",
+            confidence=1.0 - best_score,
+            policy=policy,
+            notes="rule=calibrated_multisignal_unmatched",
+        )
+
+    if policy.decision_mode != "conservative":
+        raise ContractError(f"Unsupported decision_mode: {policy.decision_mode}")
 
     scored.sort(key=lambda item: (item[0], item[1], not item[2]), reverse=True)
     best_sim, best_overlap, best_year_conflict, best_ref, best_ref_title = scored[0]
@@ -275,7 +389,10 @@ def _label_single_query(
                     notes="rule=title_match_author_mismatch",
                 )
 
-            if best_year_conflict:
+            authors_match = bool(bib_surnames and best_ref_surnames and best_overlap > 0)
+            exact_title_authors = is_exact and authors_match
+            malformed_bib_year = bib.year is not None and not 1900 <= bib.year <= 2026
+            if best_year_conflict and not (exact_title_authors and malformed_bib_year):
                 return _make_record(
                     bib,
                     groundtruth_arxiv_id=None,
