@@ -21,6 +21,11 @@ from arxiv_pipeline.matching.contracts import (
     ReferenceInput,
     canonical_id,
 )
+from arxiv_pipeline.matching.cleaning import (
+    extract_arxiv_id as cleaning_extract_arxiv_id,
+    parse_authors as cleaning_parse_authors,
+)
+from arxiv_pipeline.matching.features import _char_3grams, _cosine_counter
 
 # arXiv ID patterns: modern YYMM.NNNNN[vN] and legacy archive/YYMMNNN[vN]
 _NEW_ARXIV_ID_RE = re.compile(r"(?<![0-9])(\d{4}\.\d{4,5}(?:v\d+)?)(?![0-9])", re.I)
@@ -46,6 +51,7 @@ class HeuristicPolicy:
     min_title_chars_for_exact: int = 8
     min_margin_over_second: float = 0.10
     max_year_diff: int = 3
+    title_similarity_method: str = "hybrid_sequence_jaccard"
     accept_clear_decisions: bool = False
 
 
@@ -81,6 +87,10 @@ def extract_arxiv_ids(text: str | None) -> list[str]:
         return []
     found: list[str] = []
     seen: set[str] = set()
+    cleaned_id = cleaning_extract_arxiv_id(text)
+    if cleaned_id:
+        seen.add(cleaned_id)
+        found.append(cleaned_id)
     for pattern in (_NEW_ARXIV_ID_RE, _OLD_ARXIV_ID_RE):
         for match in pattern.finditer(text):
             try:
@@ -98,6 +108,13 @@ def extract_author_last_names(authors: Iterable[str] | None) -> set[str]:
     if not authors:
         return set()
     surnames: set[str] = set()
+    try:
+        for parsed in cleaning_parse_authors(list(authors)):
+            last = _strip_accents(parsed.get("last_name", "")).casefold().strip()
+            if last and last not in _AUTHOR_NOISE:
+                surnames.add(last)
+    except (TypeError, ValueError):
+        pass
     for raw in authors:
         if not raw or not isinstance(raw, str):
             continue
@@ -132,12 +149,18 @@ def extract_submission_year(submission_date: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def title_similarity(norm_a: str, norm_b: str) -> float:
+def title_similarity(
+    norm_a: str, norm_b: str, method: str = "hybrid_sequence_jaccard"
+) -> float:
     """Compute a conservative similarity score in [0.0, 1.0] for two normalized titles."""
     if not norm_a or not norm_b:
         return 0.0
     if norm_a == norm_b:
         return 1.0
+    if method == "char_3gram_cosine":
+        return _cosine_counter(_char_3grams(norm_a), _char_3grams(norm_b))
+    if method != "hybrid_sequence_jaccard":
+        raise ValueError(f"Unsupported title similarity method: {method}")
     tokens_a = set(norm_a.split())
     tokens_b = set(norm_b.split())
     if not tokens_a or not tokens_b:
@@ -211,7 +234,9 @@ def _label_single_query(
     if len(id_matches) == 1:
         matched_ref = id_matches[0]
         ref_title_norm = normalize_title(matched_ref.ref_title)
-        if bib_title_norm and ref_title_norm and title_similarity(bib_title_norm, ref_title_norm) < policy.arxiv_id_title_conflict_threshold:
+        if (bib_title_norm and ref_title_norm and title_similarity(
+                bib_title_norm, ref_title_norm, policy.title_similarity_method
+        ) < policy.arxiv_id_title_conflict_threshold):
             return _make_record(
                 bib,
                 groundtruth_arxiv_id=None,
@@ -248,7 +273,9 @@ def _label_single_query(
         ref_title_norm = normalize_title(ref.ref_title)
         if not ref_title_norm:
             any_missing_title = True
-        sim = title_similarity(bib_title_norm, ref_title_norm)
+        sim = title_similarity(
+            bib_title_norm, ref_title_norm, policy.title_similarity_method
+        )
         ref_surnames = extract_author_last_names(ref.ref_authors)
         overlap = len(bib_surnames & ref_surnames) if (bib_surnames and ref_surnames) else 0
         year_conflict = _has_year_conflict(bib.year, ref.ref_submission_date, policy.max_year_diff)
