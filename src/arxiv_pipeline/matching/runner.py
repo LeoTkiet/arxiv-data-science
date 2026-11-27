@@ -669,6 +669,271 @@ def _cv_summary(rows) -> str:
             + "\n".join(lines) + "\n")
 
 
+# ------------------------------------------------------- 4c. insights (train folds)
+LEARNING_FRACTIONS = (0.01, 0.05, 0.1, 0.25, 0.5, 1.0)
+CONFIDENCE_BINS = ((0.0, 0.72), (0.72, 0.85), (0.85, 0.95), (0.95, 1.01))
+
+
+def _group_rows(keys) -> dict:
+    groups: dict = {}
+    for i, k in enumerate(keys):
+        groups.setdefault(k[:2], []).append(i)
+    return groups
+
+
+def query_outcomes(keys, scores, groups, gold: dict) -> dict:
+    """Per query: top candidate/score, gold rank/score and best wrong score.
+
+    Ranking rule as the official evaluator: score descending, ties by ref id.
+    `gold` maps query -> groundtruth ref id (None for unmatched).
+    """
+    out = {}
+    for q, idx in groups.items():
+        order = sorted(idx, key=lambda i: (-scores[i], keys[i][2]))
+        g = gold.get(q)
+        refs = [keys[i][2] for i in order]
+        rank = refs.index(g) + 1 if g in refs else None
+        wrong = [scores[i] for i in order if keys[i][2] != g]
+        out[q] = dict(top_ref=refs[0], top_score=float(scores[order[0]]), gold_rank=rank,
+                      gold_score=float(scores[order[rank - 1]]) if rank else None,
+                      best_wrong=float(wrong[0]) if wrong else None)
+    return out
+
+
+def rank_metrics(outcomes: dict, labeled: set, gold: dict) -> dict:
+    """MRR@5 over labeled queries (official convention) and over matched ones only.
+
+    Queries without candidates are absent from `outcomes` and score 0.
+    """
+    matched = [q for q in labeled if gold.get(q)]
+    rr = {q: (1 / outcomes[q]["gold_rank"] if q in outcomes and outcomes[q]["gold_rank"]
+              and outcomes[q]["gold_rank"] <= 5 else 0.0) for q in matched}
+    return dict(queries=len(labeled), matched=len(matched),
+                mrr_at_5=sum(rr.values()) / len(labeled) if labeled else None,
+                mrr_matched_only=sum(rr.values()) / len(matched) if matched else None,
+                recall_at_1=sum(v == 1.0 for v in rr.values()) / len(matched) if matched else None)
+
+
+def _heldout_scores(run: Run, labels, *, folds: int, fraction: float = 1.0):
+    """Scores of every train pair from a model that never saw its publication.
+
+    Fits the selected model's kind/params on (a `fraction` of) the other folds'
+    publications. Returns (train matrix, score array). Test is never touched.
+    """
+    import numpy as np
+    from arxiv_pipeline.matching.features import get_feature_schema
+    from arxiv_pipeline.matching.model import fit_model, predict_score_array
+    config = run.config
+    schema = get_feature_schema()
+    best = next(r for r in _read_json(run.path("metrics", "model_selection.json"))
+                if r["model_id"] == run.done("train")["selected"])
+    train, train_t = _training_data(run, labels)
+    fold = _fold_of({k[0] for k in train.keys}, folds, config.seed)
+    scores = np.full(len(train.keys), np.nan)
+    for f in range(folds):
+        pubs = sorted(p for p, v in fold.items() if v != f)
+        random.Random(config.seed + 100 * f).shuffle(pubs)
+        chosen = set(pubs[:max(1, round(len(pubs) * fraction))])
+        fit = train.take([i for i, k in enumerate(train.keys) if k[0] in chosen])
+        fit_t = {k: train_t[k] for k in fit.keys}
+        held = [i for i, k in enumerate(train.keys) if fold[k[0]] == f]
+        log.info("insights fold %d/%d: fit %s on %.0f%% (%d pairs)", f + 1, folds, best["kind"],
+                 fraction * 100, len(fit.keys))
+        # Parameters were already selected on valid: fit_model only needs a tiny probe as its
+        # "valid" argument (constant evaluator), so no held-out or test data influences the fit.
+        probe = fit.take(list(range(min(10, len(fit.keys)))))
+        art = fit_model(fit, fit_t, probe, {k: fit_t[k] for k in probe.keys},
+                        dict(kind=best["kind"], seed=config.seed, grid=[best["params"]],
+                             neg_per_query=config.neg_per_query, feature_schema=schema,
+                             evaluator=lambda *a, **k: 0.0))
+        _, part = predict_score_array(art, train.take(held))
+        scores[held] = part
+        del fit, fit_t
+    return train, scores, best
+
+
+def stage_insights(run: Run, *, folds: int = 3, suspicious_limit: int = 300) -> dict:
+    """Extra analysis on held-out train publications (test never touched, model unchanged).
+
+    1. no-answer detection: does a query's top score separate matched from unmatched?
+    2. suspicious heuristic labels: confident disagreements between model and label;
+    3. learning curve: held-out quality vs share of training publications;
+    5. coefficients of the frozen model and score margins per hard-case slice.
+    """
+    if (receipt := run.done("insights")):
+        return receipt
+    import numpy as np
+    from sklearn.metrics import average_precision_score, roc_auc_score
+    from arxiv_pipeline.matching.baseline import score_pair_heuristics
+    from arxiv_pipeline.matching.model import load_artifact, predict_score_array
+    from arxiv_pipeline.matching.train import labeled_queries
+    config = run.config
+    partition, labels = load_inputs(run)
+    sup = {l.key: l for l in labels if l.is_supervised}
+    sources = ("manual", "heuristic") if config.use_silver else ("manual",)
+    train_pubs = [r.arxiv_id for r in partition.rows if r.partition == "train"]
+    labeled = labeled_queries(labels, train_pubs, allow_sources=sources)
+    gold = {q: sup[q].groundtruth_arxiv_id for q in labeled}
+
+    train, scores, best = _heldout_scores(run, labels, folds=folds)
+    groups = _group_rows(train.keys)
+    base = np.array([score_pair_heuristics(dict(zip(train.columns, v))) for v in train.X.tolist()])
+    slices = query_slices(train)
+    lr_out = query_outcomes(train.keys, scores, groups, gold)
+    base_out = query_outcomes(train.keys, base, groups, gold)
+
+    # 1. no-answer detection (queries without candidates: top score 0, i.e. "no answer")
+    qs = sorted(labeled)
+    y = np.array([1 if gold[q] else 0 for q in qs])
+
+    def top(outcomes):
+        return np.array([outcomes[q]["top_score"] if q in outcomes else 0.0 for q in qs])
+
+    detection = {}
+    for name, outcomes in (("model", lr_out), ("baseline", base_out)):
+        s = top(outcomes)
+        sweep = []
+        for t in np.round(np.arange(0.05, 1.0, 0.05), 2):
+            pred = s >= t
+            tp = int((pred & (y == 1)).sum()); fp = int((pred & (y == 0)).sum()); fn = int((~pred & (y == 1)).sum())
+            prec = tp / (tp + fp) if tp + fp else None
+            rec = tp / (tp + fn) if tp + fn else None
+            f1 = 2 * prec * rec / (prec + rec) if prec and rec else 0.0
+            sweep.append(dict(threshold=float(t), precision=prec, recall=rec, f1=f1))
+        bestf = max(sweep, key=lambda r: r["f1"])
+        detection[name] = dict(roc_auc=float(roc_auc_score(y, s)), average_precision=float(average_precision_score(y, s)),
+                               best_f1=bestf, sweep=sweep)
+    # threshold chosen on train folds, applied once to valid (frozen model scores, no tuning on valid)
+    valid_q = sorted(labeled_queries(labels, [r.arxiv_id for r in partition.rows if r.partition == "valid"]))
+    vm = load_partition_matrix(run, "valid")
+    frozen = load_artifact(run.path(best["artifact"]))
+    _, vs = predict_score_array(frozen, vm)
+    vgold = {q: sup[q].groundtruth_arxiv_id for q in valid_q}
+    vout = query_outcomes(vm.keys, vs, _group_rows(vm.keys), vgold)
+    vy = np.array([1 if vgold[q] else 0 for q in valid_q])
+    vtop = np.array([vout[q]["top_score"] if q in vout else 0.0 for q in valid_q])
+    t = detection["model"]["best_f1"]["threshold"]
+    pred = vtop >= t
+    tp = int((pred & (vy == 1)).sum()); fp = int((pred & (vy == 0)).sum()); fn = int((~pred & (vy == 1)).sum())
+    detection["model_on_valid"] = dict(threshold_from_train=t, roc_auc=float(roc_auc_score(vy, vtop)),
+                                       precision=tp / (tp + fp) if tp + fp else None,
+                                       recall=tp / (tp + fn) if tp + fn else None,
+                                       queries=len(valid_q), matched=int(vy.sum()))
+    atomic_json(run.path("analysis", "no_answer_detection.json"), detection)
+
+    # 2. suspicious heuristic labels
+    def conf_bin(c):
+        return next(f"[{a:.2f},{b:.2f})" for a, b in CONFIDENCE_BINS if c is not None and a <= c < b) if c is not None else "none"
+
+    cols = {c: i for i, c in enumerate(train.columns)}
+    keep = ("title_char_ngram_cosine", "title_exact_match", "first_author_match", "author_jaccard_last",
+            "year_diff_abs", "arxiv_id_match")
+    feat = lambda q, ref: {c: float(train.X[i, cols[c]]) for i in groups[q] if train.keys[i][2] == ref for c in keep}
+    suspicious = []
+    for q in labeled:
+        lab, o = sup[q], lr_out.get(q)
+        if o is None:
+            continue
+        if gold[q] and o["gold_rank"] != 1 and o["top_score"] - (o["gold_score"] or 0) >= 0.5:
+            kind = "matched_but_model_prefers_other"
+        elif not gold[q] and o["top_score"] >= 0.9:
+            kind = "unmatched_but_model_confident"
+        else:
+            continue
+        suspicious.append(dict(kind=kind, arxiv_id=q[0], citation_key=q[1], label_source=lab.label_source,
+                               confidence=lab.confidence, confidence_bin=conf_bin(lab.confidence),
+                               label_gold=gold[q], model_top=o["top_ref"], model_top_score=o["top_score"],
+                               gold_score=o["gold_score"], baseline_top=base_out[q]["top_ref"],
+                               top_features=feat(q, o["top_ref"]),
+                               gold_features=feat(q, gold[q]) if gold[q] else None))
+    suspicious.sort(key=lambda r: -(r["model_top_score"] - (r["gold_score"] or 0)))
+    totals = Counter((l.label_source, conf_bin(l.confidence)) for q, l in sup.items() if q in labeled)
+    found = Counter((r["label_source"], r["confidence_bin"], r["kind"]) for r in suspicious)
+    by_bin = [dict(label_source=s, confidence_bin=b, labels=n,
+                   matched_but_model_prefers_other=found[(s, b, "matched_but_model_prefers_other")],
+                   unmatched_but_model_confident=found[(s, b, "unmatched_but_model_confident")])
+              for (s, b), n in sorted(totals.items())]
+    atomic_json(run.path("analysis", "suspicious_labels.json"),
+                dict(rules=dict(matched="gold not ranked 1 and top score >= gold score + 0.5",
+                                unmatched="top score >= 0.9"),
+                     total=len(suspicious), by_confidence=by_bin, examples=suspicious[:suspicious_limit]))
+
+    # 5a. margins per slice (matched queries with at least one wrong candidate)
+    margins = {}
+    for name, outcomes in (("model", lr_out), ("baseline", base_out)):
+        for sl in ("all", *CV_SLICES):
+            m = np.array([o["gold_score"] - o["best_wrong"] for q, o in outcomes.items()
+                          if gold.get(q) and o["gold_score"] is not None and o["best_wrong"] is not None
+                          and (sl == "all" or sl in slices[q])])
+            if len(m):
+                margins[f"{name}/{sl}"] = dict(n=int(len(m)), p10=float(np.percentile(m, 10)),
+                                               median=float(np.median(m)), p90=float(np.percentile(m, 90)),
+                                               share_below_0_1=float((m < 0.1).mean()))
+    # 5b. coefficients of the frozen model (standardized features)
+    coefficients = None
+    est = frozen.estimator
+    if hasattr(est, "steps") and hasattr(est.steps[-1][1], "coef_"):
+        names = list(frozen.feature_columns)
+        imputer = est.steps[0][1]
+        if getattr(imputer, "indicator_", None) is not None:
+            names += [f"missing:{frozen.feature_columns[j]}" for j in imputer.indicator_.features_]
+        coef = est.steps[-1][1].coef_[0].tolist()
+        coefficients = sorted(({"feature": n, "coef": c} for n, c in zip(names, coef)), key=lambda r: -abs(r["coef"]))
+    atomic_json(run.path("analysis", "model_coefficients_and_margins.json"),
+                dict(coefficients=coefficients, margins=margins))
+
+    # 3. learning curve
+    curve = []
+    for frac in LEARNING_FRACTIONS:
+        if frac == 1.0:
+            sc = scores
+        else:
+            _, sc, _ = _heldout_scores(run, labels, folds=folds, fraction=frac)
+        out = query_outcomes(train.keys, sc, groups, gold)
+        row = dict(fraction=frac)
+        for sl in ("all", "no_title_signal", "no_author_signal"):
+            qset = {q for q in labeled if sl == "all" or (q in slices and sl in slices[q])}
+            row[sl] = rank_metrics(out, qset, gold)
+        curve.append(row)
+        atomic_json(run.path("analysis", "learning_curve.json"), curve)
+
+    run.path("analysis", "insights.md").write_text(_insights_md(detection, by_bin, len(suspicious), curve,
+                                                                coefficients, margins), encoding="utf-8")
+    return run.finish("insights", folds=folds, suspicious=len(suspicious),
+                      model_auc=detection["model"]["roc_auc"], baseline_auc=detection["baseline"]["roc_auc"])
+
+
+def _insights_md(detection, by_bin, n_suspicious, curve, coefficients, margins) -> str:
+    def f(v):
+        return "—" if v is None else f"{v:.4f}"
+    lines = ["## 1. Phát hiện câu không có đáp án (điểm cao nhất của câu)", "",
+             "| | ROC-AUC | Average precision | Ngưỡng F1 tốt nhất | Precision | Recall |", "|---|---|---|---|---|---|"]
+    for name in ("model", "baseline"):
+        d = detection[name]; b = d["best_f1"]
+        lines.append(f"| {name} (train, held-out) | {f(d['roc_auc'])} | {f(d['average_precision'])} | "
+                     f"{b['threshold']:.2f} | {f(b['precision'])} | {f(b['recall'])} |")
+    v = detection["model_on_valid"]
+    lines.append(f"| model (valid, ngưỡng lấy từ train) | {f(v['roc_auc'])} | — | {v['threshold_from_train']:.2f} | "
+                 f"{f(v['precision'])} | {f(v['recall'])} |")
+    lines += ["", f"## 2. Nhãn đáng nghi: {n_suspicious}", "",
+              "| Nguồn nhãn | Confidence | Số nhãn | matched nhưng model chọn khác | unmatched nhưng model chắc có |",
+              "|---|---|---|---|---|"]
+    lines += [f"| {r['label_source']} | {r['confidence_bin']} | {r['labels']} | {r['matched_but_model_prefers_other']} | "
+              f"{r['unmatched_but_model_confident']} |" for r in by_bin]
+    lines += ["", "## 3. Đường cong học (MRR@5 chỉ trên câu có đáp án, held-out)", "",
+              "| Tỉ lệ bài train | Tất cả | Không tín hiệu tiêu đề | Không tín hiệu tác giả |", "|---|---|---|---|"]
+    lines += [f"| {r['fraction']:.0%} | {f(r['all']['mrr_matched_only'])} | {f(r['no_title_signal']['mrr_matched_only'])} | "
+              f"{f(r['no_author_signal']['mrr_matched_only'])} |" for r in curve]
+    lines += ["", "## 5a. Biên tách (điểm đáp án − ứng viên sai mạnh nhất)", "",
+              "| | n | p10 | Trung vị | p90 | Tỉ lệ < 0,1 |", "|---|---|---|---|---|---|"]
+    lines += [f"| {k} | {v['n']} | {f(v['p10'])} | {f(v['median'])} | {f(v['p90'])} | {v['share_below_0_1']:.1%} |"
+              for k, v in margins.items()]
+    if coefficients:
+        lines += ["", "## 5b. Hệ số Logistic Regression (feature đã chuẩn hoá)", "", "| Feature | Hệ số |", "|---|---|"]
+        lines += [f"| {r['feature']} | {r['coef']:+.3f} |" for r in coefficients]
+    return "\n".join(lines) + "\n"
+
+
 # ----------------------------------------------------------- 5. freeze + test
 def _write_scores(path: Path, keys, scores) -> None:
     import pyarrow as pa
@@ -719,13 +984,14 @@ def write_run_manifest(run: Run) -> Path:
     manifest = dict(schema_version="3.0", task="MS3-matching-models", run_id=run.run_id, created_at=_now(),
                     source_version=_source_version(), python=platform.python_version(),
                     versions=_versions(), config=_jsonable(asdict(run.config)),
-                    stages={s: run.done(s) for s in ("inputs", "features", "train", "analysis", "cv", "ablation", "freeze")},
+                    stages={s: run.done(s) for s in ("inputs", "features", "train", "analysis", "cv", "ablation", "insights", "freeze")},
                     test_labels_read=False)
     atomic_json(run.path("run_manifest.json"), manifest)
     return run.path("run_manifest.json")
 
 
-def run_all(config: RunConfig, *, freeze: bool = False, cv: bool = False, ablation: bool = False) -> Run:
+def run_all(config: RunConfig, *, freeze: bool = False, cv: bool = False, ablation: bool = False,
+            insights: bool = False) -> Run:
     run = Run(config)
     stage_inputs(run)
     stage_features(run)
@@ -735,6 +1001,8 @@ def run_all(config: RunConfig, *, freeze: bool = False, cv: bool = False, ablati
         stage_cv(run)
     if ablation:
         stage_ablation(run)
+    if insights:
+        stage_insights(run)
     if freeze:
         stage_freeze_and_score(run)
     write_run_manifest(run)
@@ -755,6 +1023,8 @@ def main(argv=None) -> int:
                     help="compare models vs baseline by hard-case slice with grouped CV on train")
     ap.add_argument("--ablation", action="store_true",
                     help="ablation of the selected model (feature groups, manual-only labels) on train folds")
+    ap.add_argument("--insights", action="store_true",
+                    help="no-answer detection, suspicious labels, learning curve, coefficients (train folds)")
     ap.add_argument("--freeze", action="store_true",
                     help="freeze the selected model and score test (only after reviewing selection and analysis)")
     args = ap.parse_args(argv)
@@ -762,7 +1032,7 @@ def main(argv=None) -> int:
                        output_root=args.output, run_id=args.run_id or new_run_id(),
                        kinds=tuple(k.strip() for k in args.kinds.split(",") if k.strip()),
                        seed=args.seed, neg_per_query=args.neg_per_query or None)
-    run = run_all(config, freeze=args.freeze, cv=args.cv, ablation=args.ablation)
+    run = run_all(config, freeze=args.freeze, cv=args.cv, ablation=args.ablation, insights=args.insights)
     print("RUN_ID:", run.run_id)
     print(run.path("metrics", "model_selection.md").read_text(encoding="utf-8"))
     print("Kết quả:", run.root)

@@ -289,3 +289,38 @@ def test_ablation_variants_on_train_folds(setup):
     train_pubs = {r.arxiv_id for r in manifest.rows if r.partition == "train"}
     assert all(r["queries"] <= sum(l.arxiv_id in train_pubs for l in labels) for r in rows)
     assert not run.path("frozen.json").exists()  # analysis never freezes or scores test
+
+
+def test_rank_metrics_match_official_evaluator(setup):
+    from arxiv_pipeline.matching.model import evaluator, predict_scores
+    from arxiv_pipeline.matching.train import labeled_queries
+    config, bundles, labels, manifest = setup
+    run = _prepared(config)
+    runner.stage_train(run)
+    from arxiv_pipeline.matching.model import load_artifact, predict_score_array
+    art = load_artifact(run.path("models", run.done("train")["selected"]))
+    valid, valid_t = runner._labeled_view(runner.load_partition_matrix(run, "valid"), labels,
+                                          allow_sources=("manual", "heuristic"))
+    queries = labeled_queries(labels, [r.arxiv_id for r in manifest.rows if r.partition == "valid"])
+    sup = {l.key: l for l in labels if l.is_supervised}
+    gold = {q: sup[q].groundtruth_arxiv_id for q in queries}
+    _, scores = predict_score_array(art, valid)
+    out = runner.query_outcomes(valid.keys, scores, runner._group_rows(valid.keys), gold)
+    ours = runner.rank_metrics(out, set(queries), gold)
+    official = evaluator()(predict_scores(art, valid), valid_t, queries=queries)
+    assert abs(ours["mrr_at_5"] - official) < 1e-12
+
+
+def test_insights_stage_outputs(setup):
+    config, bundles, labels, manifest = setup
+    run = _prepared(config)
+    runner.stage_train(run)
+    receipt = runner.stage_insights(run, folds=2)
+    for name in ("no_answer_detection.json", "suspicious_labels.json", "learning_curve.json",
+                 "model_coefficients_and_margins.json", "insights.md"):
+        assert run.path("analysis", name).is_file(), name
+    curve = json.loads(run.path("analysis", "learning_curve.json").read_text())
+    assert [r["fraction"] for r in curve] == list(runner.LEARNING_FRACTIONS)
+    det = json.loads(run.path("analysis", "no_answer_detection.json").read_text())
+    assert 0 <= det["model"]["roc_auc"] <= 1 and "model_on_valid" in det
+    assert receipt["suspicious"] >= 0 and not run.path("frozen.json").exists()
